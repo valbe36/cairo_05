@@ -56,9 +56,15 @@ namespace InterlockingMasonryLocalForces
     public class Face
     {
         public int Id { get; set; }
-        public List<int> VertexIds { get; set; } = new List<int>();
-        public double Length { get; set; }    // contact length (height) in 2D
+        public double Length { get; set; }
         public double Thickness { get; set; }
+
+        // If you want a boolean for cohesion
+        public bool HasCohesion { get; set; } = false;
+
+        // Possibly store a "CohesionValue" if you want different c for each face
+        // public double CohesionValue { get; set; } = 0.0;
+        public List<int> VertexIds { get; set; } = new List<int>();
     }
 
     /// A container for all geometry in the problem (faces, vertices, etc.).
@@ -66,6 +72,7 @@ namespace InterlockingMasonryLocalForces
     {
         public Dictionary<int, ContactPoint> Vertices { get; } = new Dictionary<int, ContactPoint>();
         public Dictionary<int, Face> Faces { get; } = new Dictionary<int, Face>();
+
     }
 
     /// Simple struct to identify one face-vertex pair
@@ -93,10 +100,10 @@ namespace InterlockingMasonryLocalForces
             // the even indices are f_n, the odd are f_t, for that pair.
             private GRBVar[] fAll;
             private GRBVar lambda;
+            private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
 
-
-            /// The main solve routine
-            public void SolveProblem(GeometryModel geometry, ProblemData data)
+        /// The main solve routine
+        public void SolveProblem(GeometryModel geometry, ProblemData data)
             {
                 // 1) Collect face-vertex pairs in a consistent order
                 faceVertexPairs = new List<FaceVertexPair>();
@@ -137,17 +144,18 @@ namespace InterlockingMasonryLocalForces
                         // 6)   Add face eccentricity constraints 
                         AddFaceEccConstraints(model, geometry, data);
 
-
-                    // 7) Objective: maximize lambda
-                    GRBLinExpr obj = 0.0;
+                        // 7) Objective: maximize lambda
+                        GRBLinExpr obj = 0.0;
                         obj.AddTerm(1.0, lambda);
                         model.SetObjective(obj, GRB.MAXIMIZE);
                         model.Write("debugModel.lp");
-                    // 8) Solve
+                       
+                        // 8) Solve
                         model.Optimize();
+                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results.txt");
+                    // 9) Print solution
+                    PrintSolution(model);
 
-                        // 9) Print solution
-                        PrintSolution(model);
                     }
                 }
             }
@@ -220,28 +228,53 @@ namespace InterlockingMasonryLocalForces
             /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
             /// plus no tension fN_j >= 0 (already in the variable bound).
             /// </summary>
-            private void AddContactConstraints(GRBModel model, ProblemData data)
+            private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
             {
                 double mu = data.Mu;
-                int m = faceVertexPairs.Count;
+            foreach (var kvp in geometry.Faces)
+            {
+                Face face = kvp.Value;
+                // skip if no vertices, but we said always 2 in your design
+                if (face.VertexIds.Count < 2) continue;
 
-                for (int j = 0; j < m; j++)
+                // For each vertex on that face
+                foreach (int vId in face.VertexIds)
                 {
-                    GRBVar fN = fAll[2 * j];
-                    GRBVar fT = fAll[2 * j + 1];
+                    int pairIndex = FindFaceVertexPairIndex(face.Id, vId);
+                    if (pairIndex < 0)
+                    {
+                        // means we can't find a column for this pair, skip or throw
+                        continue;
+                    }
 
-                    // - mu * fN <= fT <= mu * fN
-                    model.AddConstr(fT <= mu * fN, $"FricPos_{j}");
-                    model.AddConstr(fT >= -mu * fN, $"FricNeg_{j}");
+                    GRBVar fN = fAll[2 * pairIndex];
+                    GRBVar fT = fAll[2 * pairIndex + 1];
+
+                    double cVal = 0.0;
+                    if (face.HasCohesion)
+                    {
+                        cVal = data.Cohesion;  // or face.CohesionValue if it's face-specific
+                    }
+                    double area = face.Thickness;
+                    // Typically area = thickness * unitDepth in 2D, but let's keep it simple
+
+                    // Now apply friction constraints:
+                    // f_t <= mu*f_n + cVal*area
+                    model.AddConstr(fT <= mu * fN + cVal * area, $"FricPos_face{face.Id}_v{vId}");
+                    model.AddConstr(fT >= -(mu * fN + cVal * area), $"FricNeg_face{face.Id}_v{vId}");
+
+                    // Also no-tension if you want:
+                    model.AddConstr(fN >= 0.0, $"NoTension_face{face.Id}_v{vId}");
                 }
             }
+        }
 
-            private void AddFaceEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+        private void AddFaceEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+        {
+            double sigmaC = data.SigmaC; 
+            faceEccVars[face.Id] = eK;
+            foreach (var fKvp in geometry.Faces)
             {
-            double sigmaC = data.SigmaC;
-
-               foreach (var fKvp in geometry.Faces)
-               {
                 Face face = fKvp.Value;
                 // We assume each face in 2D has exactly 2 vertices.
                 // If there's only 1 or 0, skip. If more than 2, handle carefully or skip.
@@ -254,12 +287,12 @@ namespace InterlockingMasonryLocalForces
                 int j1 = FindFaceVertexIndex(face.Id, v1);
                 int j2 = FindFaceVertexIndex(face.Id, v2);
                 if (j1 < 0 || j2 < 0)
-                    {
-                    // If we can't find them, skip or throw an error
-                    Console.WriteLine($"Error: missing face-vertex pair for face={face.Id}, v1={v1}, v2={v2}");
-                    continue;
-                    }
-
+               {
+               // If we can't find them, skip or throw an error
+               Console.WriteLine($"Error: missing face-vertex pair for face={face.Id}, v1={v1}, v2={v2}");
+               continue;
+               }
+                
                 // 2) Retrieve the local normal variables
                 //    f_n(v1) = fAll[2*j1],  f_n(v2) = fAll[2*j2]
                 GRBVar fn1 = fAll[2 * j1];
@@ -268,23 +301,22 @@ namespace InterlockingMasonryLocalForces
                 // 3) Define a new variable f_n,k = fn1 + fn2
                 GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
                     $"fnk_face{face.Id}");
-                  {
-                    GRBLinExpr sumExpr = 0.0;
-                    sumExpr.AddTerm(1.0, fn1);
-                    sumExpr.AddTerm(1.0, fn2);
-                    model.AddConstr(fnk == sumExpr, $"Def_fnk_{face.Id}");
-                  }
+               {
+               GRBLinExpr sumExpr = 0.0;
+               sumExpr.AddTerm(1.0, fn1);
+               sumExpr.AddTerm(1.0, fn2);
+               model.AddConstr(fnk == sumExpr, $"Def_fnk_{face.Id}");
+               }
 
-                double Lk = face.Length;       // half-joint length in 2D
-                double t_k = face.Thickness;
+               double Lk = face.Length;       // half-joint length in 2D
+               double t_k = face.Thickness;
 
                 // 4) Eccentricity variable e_k with range in [-Lk/2, Lk/2]
-                GRBVar eK = model.AddVar(-Lk / 2.0, Lk / 2.0, 0.0, GRB.CONTINUOUS,
-                    $"eK_face{face.Id}");
+                GRBVar eK = model.AddVar(-Lk / 2, Lk / 2, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
 
                 // 5) Moment equilibrium (bilinear eqn):
                 //    fnk * eK = (fn2 - fn1)*(Lk/2) => fnk*eK - (Lk/2)*fn2 + (Lk/2)*fn1 == 0
-                   {
+               {
                     GRBQuadExpr mq = new GRBQuadExpr();
                     // + fnk * eK
                     mq.AddTerm(1.0, fnk, eK);
@@ -294,36 +326,35 @@ namespace InterlockingMasonryLocalForces
                     mq.AddTerm(Lk / 2.0, fn1);
 
                     model.AddQConstr(mq == 0.0, $"MomentEq_face_{face.Id}");
-                    }
+               }
 
                     // 6) Strength limit constraints, if sigmaC > 0 and thickness > 0
                     //    eK + fnk/(2*sigmaC*t_k) <= Lk/2
                     //    eK - fnk/(2*sigmaC*t_k) >= -Lk/2
                     if (sigmaC > 1e-9 && t_k > 1e-9)
-                    {
+               {
                     double denom = 2.0 * sigmaC * t_k;
 
-                       {
-                        // eK + (1/denom)*fnk <= Lk/2
-                        GRBLinExpr lhsUp = 0.0;
-                        lhsUp.AddTerm(1.0, eK);
-                        lhsUp.AddTerm(1.0 / denom, fnk);
-                        model.AddConstr(lhsUp <= Lk / 2.0, $"StrengthUp_{face.Id}");
-                       }
-
-                       {
-                        // eK - (1/denom)*fnk >= -Lk/2
-                        GRBLinExpr lhsLo = 0.0;
-                        lhsLo.AddTerm(1.0, eK);
-                        lhsLo.AddTerm(-1.0 / denom, fnk);
-                        model.AddConstr(lhsLo >= -Lk / 2.0, $"StrengthLo_{face.Id}");
-                       }
+                    {
+                    // eK + (1/denom)*fnk <= Lk/2
+                    GRBLinExpr lhsUp = 0.0;
+                    lhsUp.AddTerm(1.0, eK);
+                    lhsUp.AddTerm(1.0 / denom, fnk);
+                    model.AddConstr(lhsUp <= Lk / 2.0, $"StrengthUp_{face.Id}");
+                    }
+                    {
+                    // eK - (1/denom)*fnk >= -Lk/2
+                    GRBLinExpr lhsLo = 0.0;
+                    lhsLo.AddTerm(1.0, eK);
+                    lhsLo.AddTerm(-1.0 / denom, fnk);
+                    model.AddConstr(lhsLo >= -Lk / 2.0, $"StrengthLo_{face.Id}");
                     }
                }
             }
+        }
 
-             /// Find the index j in faceVertexPairs for (faceId, vertexId).
-             private int FindFaceVertexIndex(int faceId, int vertexId)
+        /// Find the index j in faceVertexPairs for (faceId, vertexId).
+        private int FindFaceVertexIndex(int faceId, int vertexId)
         {
             for (int j = 0; j < faceVertexPairs.Count; j++)
             {
@@ -333,53 +364,117 @@ namespace InterlockingMasonryLocalForces
             }
             return -1;
         }
-        /// <summary>
+
         /// Example of printing the solution
-        /// </summary>
         private void PrintSolution(GRBModel model)
+        {
+            int status = model.Status;
+            if (model.SolCount > 0)
             {
-                int status = model.Status;
-                if (model.SolCount > 0)
-                {
-                    Console.WriteLine($"Feasible solution found. Status={status}");
-                    double lamVal = lambda.X;
-                    Console.WriteLine($"lambda = {lamVal:F4}");
+            Console.WriteLine($"Feasible solution found. Status={status}");
+            double lamVal = lambda.X;
+            Console.WriteLine($"lambda = {lamVal:F4}");
 
-                    for (int j = 0; j < fAll.Length; j += 2)
-                    {
-                        double fn = fAll[j].X;
-                        double ft = fAll[j + 1].X;
-                        // faceVertexPairs[j/2] is the pair info
-                        var pair = faceVertexPairs[j / 2];
-                        Console.WriteLine($"Pair (face={pair.FaceId}, v={pair.VertexId}): fN={fn:F3}, fT={ft:F3}");
-                    }
-                }
-                else
+                for (int j = 0; j < fAll.Length; j += 2)
                 {
-                    Console.WriteLine($"No feasible solution. Status={status}");
-                }
-            if (model.Status == 4)
-                //LOADED = 1,  OPTIMAL = 2, INFEASIBLE = 3, INF_OR_UNBD = 4, UNBOUNDED = 5
-
-            {
-                // Sometimes turning off presolve helps to distinguish infeasible from unbounded
-                model.Parameters.Presolve = 0;
-                model.Optimize();
-
-                if (model.Status == 3)
-                {
-                    Console.WriteLine("Model is infeasible. Computing IIS...");
-                    model.ComputeIIS();
-                    model.Write("infeasible.ilp");
-                }
-                else if (model.Status == 5)
-                {
-                    Console.WriteLine("Model is unbounded!");
-                    // Possibly do something else
+                double fn = fAll[j].X;
+                double ft = fAll[j + 1].X;
+                // faceVertexPairs[j/2] is the pair info
+                var pair = faceVertexPairs[j / 2];
+                Console.WriteLine($"Pair (face={pair.FaceId}, v={pair.VertexId}): fN={fn:F3}, fT={ft:F3}");
                 }
             }
+            else
+            {
+            Console.WriteLine($"No feasible solution. Status={status}");
+            }
+            if (model.Status == 4)
+            //LOADED = 1,  OPTIMAL = 2, INFEASIBLE = 3, INF_OR_UNBD = 4, UNBOUNDED = 5
+            {
+            // Sometimes turning off presolve helps to distinguish infeasible from unbounded
+            model.Parameters.Presolve = 0;
+            model.Optimize();
+
+            if (model.Status == 3)
+            {
+            Console.WriteLine("Model is infeasible. Computing IIS...");
+            model.ComputeIIS();
+            model.Write("infeasible.ilp");
+            }
+            else if (model.Status == 5)
+            {
+            Console.WriteLine("Model is unbounded!");
+            // Possibly do something else
+            }
         }
-        
+        }
+
+        private void SaveResultsToFile(GRBModel model, string resultsFilePath)
+        {
+            // If no solution, do nothing
+            if (model.SolCount == 0)
+            {
+                Console.WriteLine("No feasible solution, nothing to save.");
+                return;
+            }
+
+            // Ensure the output directory exists
+            string directoryPath = Path.GetDirectoryName(resultsFilePath);
+            if (!Directory.Exists(directoryPath))
+            {
+                Directory.CreateDirectory(directoryPath);
+            }
+
+            using (StreamWriter writer = new StreamWriter(resultsFilePath))
+            {
+                // 1) Save lambda
+                try
+                {
+                    double lamVal = lambda.Get(GRB.DoubleAttr.X);
+                    writer.WriteLine($"lambda = {lamVal:F4}");
+                    Console.WriteLine($"lambda = {lamVal:F4}");
+                }
+                catch (GRBException e)
+                {
+                    writer.WriteLine($"Could not retrieve lambda: {e.Message}");
+                }
+
+                // 2) Save local (f_n, f_t) for each face–vertex pair
+                for (int j = 0; j < faceVertexPairs.Count; j++)
+                {
+                    int indexFn = 2 * j;
+                    int indexFt = 2 * j + 1;
+
+                    double fnVal, ftVal;
+                    try
+                    {
+                        fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
+                        ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
+                    }
+                    catch (GRBException e)
+                    {
+                        writer.WriteLine($"Could not retrieve forces for pair j={j}: {e.Message}");
+                        continue;
+                    }
+
+                    var pair = faceVertexPairs[j]; // (faceId, vertexId)
+                    writer.WriteLine($"Face {pair.FaceId}, Vertex {pair.VertexId}: " +
+                                     $"fn={fnVal:F3}, ft={ftVal:F3}");
+                }
+                // 4) If we have face eccentricities, print them too
+                foreach (var kvp in faceEccVars)
+                {
+                    int faceId = kvp.Key;
+                    GRBVar eccVar = kvp.Value;
+                    double eccVal = eccVar.X;  // or eccVar.Get(GRB.DoubleAttr.X)
+                    writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3}");
+                }
+
+            }
+
+            Console.WriteLine($"Results saved to {resultsFilePath}");
+        }
+
     } //end public class LocalOptimizer
 
 
@@ -404,6 +499,17 @@ namespace InterlockingMasonryLocalForces
                 // faces
                 string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_parallel.txt";
                 LoadFacesFromFile(geometry, faceFilePath);
+                if (!string.IsNullOrEmpty(faceFilePath))
+                {
+                    LoadFacesFromFile(geometry, faceFilePath);
+                    // Then AddContactConstraints, EccConstraints, etc.
+                }
+                else
+                {
+                    Console.WriteLine("No face file. Skipping face constraints entirely.");
+                }
+
+
                 // 4) Possibly ensure we have all vertices that appear in faces
                 AutoPopulateVertices(geometry);
 
@@ -548,64 +654,86 @@ namespace InterlockingMasonryLocalForces
         }
 
 
-        // Load Faces from file:   Format (per line): "face_ID_k", vertexId1, vertexId2, h_k, t_k
+        // Load Faces from file:   Format (per line): faceID, length, thickness, cohesionFlag, vertex1, vertex2, ...
         static void LoadFacesFromFile(GeometryModel geometry, string faceFilePath)
         {
+            // If the user didn't provide a faceFilePath, or it's empty, skip or return
+            if (string.IsNullOrEmpty(faceFilePath))
+            {
+                Console.WriteLine("No face file provided. Skipping face constraints altogether.");
+                return;
+            }
             Console.WriteLine($"Loading faces from: {faceFilePath}");
             if (!File.Exists(faceFilePath))
                 throw new FileNotFoundException(faceFilePath);
 
-            int lineNo = 0;
             var lines = File.ReadAllLines(faceFilePath);
+            int lineNo = 0;
             foreach (var rawLine in lines)
             {
                 lineNo++;
                 string line = rawLine.Trim();
+                // Skip empty or commented lines
                 if (string.IsNullOrEmpty(line) || line.StartsWith("#"))
-                    continue; // ignore blank or commented lines
+                    continue;
 
-                // split by comma
+                // Split by comma
                 string[] parts = line.Split(',');
+                // We expect at least 5 columns for: faceID, length, thickness, cohesionFlag, plus >=1 vertex
                 if (parts.Length < 5)
                 {
-                    Console.WriteLine($"Warning: line {lineNo}, expected 5 values (faceID,v1,v2,length,thickness). Found {parts.Length}. Skipping.");
+                    Console.WriteLine($"Warning: line {lineNo}, expected at least 5 columns. Found {parts.Length}. Skipping this line.");
                     continue;
                 }
 
+                // 1) Parse the first 4 fields
                 if (!int.TryParse(parts[0], out int faceId))
                 {
-                    Console.WriteLine($"Cannot parse faceId at line {lineNo}. Skipping.");
+                    Console.WriteLine($"Could not parse faceId at line {lineNo}. Skipping.");
                     continue;
                 }
-                if (!int.TryParse(parts[1], out int v1))
+                if (!double.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out double faceLength))
                 {
-                    Console.WriteLine($"Cannot parse vertex1 ID at line {lineNo}. Skipping.");
+                    Console.WriteLine($"Could not parse face length at line {lineNo}. Skipping.");
                     continue;
                 }
-                if (!int.TryParse(parts[2], out int v2))
+                if (!double.TryParse(parts[2], NumberStyles.Any, CultureInfo.InvariantCulture, out double faceThickness))
                 {
-                    Console.WriteLine($"Cannot parse vertex2 ID at line {lineNo}. Skipping.");
+                    Console.WriteLine($"Could not parse face thickness at line {lineNo}. Skipping.");
+                    continue;
+                }
+                if (!int.TryParse(parts[3], out int cohesionFlag))
+                {
+                    Console.WriteLine($"Could not parse cohesionFlag at line {lineNo}. Skipping.");
                     continue;
                 }
 
-                if (!double.TryParse(parts[3], NumberStyles.Any, CultureInfo.InvariantCulture, out double length))
+                // 2) Extract the vertex IDs from the remaining fields
+                var vertexList = new List<int>();
+                for (int i = 4; i < parts.Length; i++)
                 {
-                    Console.WriteLine($"Cannot parse face length at line {lineNo}. Skipping.");
-                    continue;
+                    if (int.TryParse(parts[i], out int vId))
+                    {
+                        vertexList.Add(vId);
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Could not parse vertex ID '{parts[i]}' at line {lineNo}. Skipping that ID.");
+                    }
                 }
-                if (!double.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture, out double thick))
+                if (vertexList.Count < 2)
                 {
-                    Console.WriteLine($"Cannot parse face thickness at line {lineNo}. Skipping.");
-                    continue;
+                    Console.WriteLine($"Warning: face {faceId} has fewer than 2 vertices listed. This might cause issues. We proceed anyway.");
                 }
 
-                // Create the Face object
+                // 3) Create the Face object
                 Face newFace = new Face
                 {
                     Id = faceId,
-                    VertexIds = new List<int> { v1, v2 },
-                    Length = length,
-                    Thickness = thick
+                    Length = faceLength,
+                    Thickness = faceThickness,
+                    HasCohesion = (cohesionFlag == 1), // or store a double Cohesion if you want
+                    VertexIds = vertexList,
                 };
 
                 // Check for duplicate face ID
@@ -623,11 +751,12 @@ namespace InterlockingMasonryLocalForces
             // Quick listing:
             foreach (var kvp in geometry.Faces)
             {
-                Face f = kvp.Value;
-                Console.WriteLine($"Face ID={f.Id} with vertices ({f.VertexIds[0]}, {f.VertexIds[1]}) " +
-                                  $"Length={f.Length}, Thickness={f.Thickness}");
+                var f = kvp.Value;
+                string vStr = string.Join(",", f.VertexIds);
+                Console.WriteLine($"Face ID={f.Id}, L={f.Length:F3}, t={f.Thickness:F3}, HasCoh={f.HasCohesion}, Vertices=[{vStr}]");
             }
         }
+        
         // Insert vertices if not already present
         static void AutoPopulateVertices(GeometryModel geometry)
         {
