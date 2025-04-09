@@ -17,7 +17,7 @@ Input Files:
    vector_B_values
    [n values...]
 2. Face Geometry File (*.txt):
-   Format (per line): # faceId, v1, v2, length, thickness ex: 0, 10, 11, 2.0, 0.15
+   Format (per line): # faceId,faceID, length, thickness, cohesionFlag, vertex1, vertex2 .
        # lines are disregarded
 
 */
