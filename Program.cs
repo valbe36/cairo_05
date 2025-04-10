@@ -34,6 +34,7 @@ namespace InterlockingMasonryLocalForces
         public double[,] MatrixA { get; set; }  // Size (n x p)
         public double[] VectorB { get; set; }   // Size (n)
 
+        public double[] G { get; set; }
         public int NumRows => (MatrixA == null) ? 0 : MatrixA.GetLength(0);   // n
         public int NumCols => (MatrixA == null) ? 0 : MatrixA.GetLength(1);   // p
 
@@ -100,7 +101,22 @@ namespace InterlockingMasonryLocalForces
             // the even indices are f_n, the odd are f_t, for that pair.
             private GRBVar[] fAll;
             private GRBVar lambda;
+            //  storing Gurobi variables (eccVars) mapped by faceId
             private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
+            // Similarly,  face-level normal sums
+            private Dictionary<int, GRBVar> faceFnkVars = new Dictionary<int, GRBVar>();
+
+        private int FindFaceVertexPairIndex(int faceId, int vertexId)
+        {
+            // faceVertexPairs is your List<FaceVertexPair>, presumably defined as a field in this class
+            for (int j = 0; j < faceVertexPairs.Count; j++)
+            {
+                var pair = faceVertexPairs[j];
+                if (pair.FaceId == faceId && pair.VertexId == vertexId)
+                    return j;
+            }
+            return -1; // not found
+        }
 
         /// The main solve routine
         public void SolveProblem(GeometryModel geometry, ProblemData data)
@@ -139,7 +155,7 @@ namespace InterlockingMasonryLocalForces
                         AddEquilibriumConstraints(model, data);
 
                         // 5) Add friction & no-tension constraints
-                        AddContactConstraints(model, data);
+                        AddContactConstraints(model, geometry, data);
 
                         // 6)   Add face eccentricity constraints 
                         AddFaceEccConstraints(model, geometry, data);
@@ -189,16 +205,15 @@ namespace InterlockingMasonryLocalForces
                 model.Update();
             }
 
-            /// <summary>
-            /// A * fAll = B * lambda
+
+            /// A * fAll - G = B * lambda
             /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
-            /// </summary>
             private void AddEquilibriumConstraints(GRBModel model, ProblemData data)
             {
                 int n = data.NumRows;
                 int p = data.NumCols;  // should match fAll.Length
-
-                if (n == 0 || p == 0)
+ 
+            if (n == 0 || p == 0)
                     return;
 
                 if (p != fAll.Length)
@@ -216,63 +231,63 @@ namespace InterlockingMasonryLocalForces
                         if (Math.Abs(valA) > 1e-15)
                             lhs.AddTerm(valA, fAll[j]);
                     }
-                    // Right side: B[i] * lambda
-                    GRBLinExpr rhs = 0.0;
+                // Subtract the gravity portion G[i]
+                if (data.G != null && i < data.G.Length)
+                    lhs.AddConstant(-data.G[i]);
+                // Right side: B[i] * lambda
+                GRBLinExpr rhs = 0.0;
+                if (data.VectorB != null && i < data.VectorB.Length)
                     rhs.AddTerm(data.VectorB[i], lambda);
 
-                    model.AddConstr(lhs == rhs, $"Equil_{i}");
+                model.AddConstr(lhs == rhs, $"Equil_{i}");
                 }
             }
 
-            /// <summary>
-            /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
-            /// plus no tension fN_j >= 0 (already in the variable bound).
-            /// </summary>
-            private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
-            {
-                double mu = data.Mu;
+        /// <summary>
+        /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
+        /// plus no tension fN_j >= 0 (already in the variable bound).
+        /// </summary>
+        private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+        {
+            double mu = data.Mu;
+
             foreach (var kvp in geometry.Faces)
             {
                 Face face = kvp.Value;
-                // skip if no vertices, but we said always 2 in your design
-                if (face.VertexIds.Count < 2) continue;
+                if (face.VertexIds.Count < 2)
+                    continue; // skip if <2 vertices
 
-                // For each vertex on that face
                 foreach (int vId in face.VertexIds)
                 {
                     int pairIndex = FindFaceVertexPairIndex(face.Id, vId);
                     if (pairIndex < 0)
                     {
-                        // means we can't find a column for this pair, skip or throw
+                        Console.WriteLine($"No face‐vertex pair index found for face={face.Id}, vId={vId}!");
                         continue;
                     }
 
+                    // fN, fT
                     GRBVar fN = fAll[2 * pairIndex];
                     GRBVar fT = fAll[2 * pairIndex + 1];
 
-                    double cVal = 0.0;
-                    if (face.HasCohesion)
-                    {
-                        cVal = data.Cohesion;  // or face.CohesionValue if it's face-specific
-                    }
-                    double area = face.Thickness;
-                    // Typically area = thickness * unitDepth in 2D, but let's keep it simple
+                    // Possibly apply cohesion if face.HasCohesion
+                    double cVal = face.HasCohesion ? data.Cohesion : 0.0;
+                    double area = face.Thickness; // or thickness*someDepth
 
-                    // Now apply friction constraints:
-                    // f_t <= mu*f_n + cVal*area
-                    model.AddConstr(fT <= mu * fN + cVal * area, $"FricPos_face{face.Id}_v{vId}");
-                    model.AddConstr(fT >= -(mu * fN + cVal * area), $"FricNeg_face{face.Id}_v{vId}");
+                    // friction w/ cohesion
+                    model.AddConstr(fT <= mu * fN + cVal * area, $"FricPos_{face.Id}_{vId}");
+                    model.AddConstr(fT >= -(mu * fN + cVal * area), $"FricNeg_{face.Id}_{vId}");
 
-                    // Also no-tension if you want:
-                    model.AddConstr(fN >= 0.0, $"NoTension_face{face.Id}_v{vId}");
+                    // optional no‐tension
+                    model.AddConstr(fN >= 0.0, $"NoTension_{face.Id}_{vId}");
                 }
             }
         }
 
+
         private void AddFaceEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
-            double sigmaC = data.SigmaC; 
-            faceEccVars[face.Id] = eK;
+            double sigmaC = data.SigmaC;
             foreach (var fKvp in geometry.Faces)
             {
                 Face face = fKvp.Value;
@@ -284,72 +299,63 @@ namespace InterlockingMasonryLocalForces
                 int v2 = face.VertexIds[1];
 
                 // 1) Find the local indices in faceVertexPairs
-                int j1 = FindFaceVertexIndex(face.Id, v1);
-                int j2 = FindFaceVertexIndex(face.Id, v2);
-                if (j1 < 0 || j2 < 0)
-               {
-               // If we can't find them, skip or throw an error
-               Console.WriteLine($"Error: missing face-vertex pair for face={face.Id}, v1={v1}, v2={v2}");
-               continue;
-               }
-                
-                // 2) Retrieve the local normal variables
-                //    f_n(v1) = fAll[2*j1],  f_n(v2) = fAll[2*j2]
-                GRBVar fn1 = fAll[2 * j1];
-                GRBVar fn2 = fAll[2 * j2];
+                int idx1 = FindFaceVertexPairIndex(face.Id, v1);
+                int idx2 = FindFaceVertexPairIndex(face.Id, v2);
+                if (idx1 < 0 || idx2 < 0)
+                {
+                    // cannot proceed if the face–vertex pair wasn't found
+                    Console.WriteLine($"Missing face–vertex pair for Face={face.Id}. Skipping ecc constraints.");
+                    continue;
+                }
+
+                GRBVar fn1 = fAll[2 * idx1];   // local normal var for (face, v1)
+                GRBVar fn2 = fAll[2 * idx2];   // local normal var for (face, v2)
 
                 // 3) Define a new variable f_n,k = fn1 + fn2
-                GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
-                    $"fnk_face{face.Id}");
-               {
-               GRBLinExpr sumExpr = 0.0;
-               sumExpr.AddTerm(1.0, fn1);
-               sumExpr.AddTerm(1.0, fn2);
-               model.AddConstr(fnk == sumExpr, $"Def_fnk_{face.Id}");
-               }
+                GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");
+                {
+                    GRBLinExpr sumExpr = new GRBLinExpr();
+                    sumExpr.AddTerm(1.0, fn1);
+                    sumExpr.AddTerm(1.0, fn2);
+                    model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
+                }
 
-               double Lk = face.Length;       // half-joint length in 2D
-               double t_k = face.Thickness;
+                double Lk = face.Length;
+                GRBVar eK = model.AddVar(-Lk / 2.0, Lk / 2.0, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
 
-                // 4) Eccentricity variable e_k with range in [-Lk/2, Lk/2]
-                GRBVar eK = model.AddVar(-Lk / 2, Lk / 2, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
+                faceEccVars[face.Id] = eK;
 
-                // 5) Moment equilibrium (bilinear eqn):
+                // 3) Moment equilibrium:  fnk * eK = (fn2 - fn1)*(Lk/2)
+                GRBQuadExpr mq = new GRBQuadExpr();
+                mq.AddTerm(1.0, fnk, eK);        // fnk*eK
+                mq.AddTerm(-Lk / 2.0, fn2);      // -(Lk/2)*fn2
+                mq.AddTerm(Lk / 2.0, fn1);       // +(Lk/2)*fn1
+                model.AddQConstr(mq == 0.0, $"MomentEq_face{face.Id}");
+
                 //    fnk * eK = (fn2 - fn1)*(Lk/2) => fnk*eK - (Lk/2)*fn2 + (Lk/2)*fn1 == 0
-               {
-                    GRBQuadExpr mq = new GRBQuadExpr();
-                    // + fnk * eK
-                    mq.AddTerm(1.0, fnk, eK);
-                    // - (Lk/2)*fn2
-                    mq.AddTerm(-Lk / 2.0, fn2);
-                    // + (Lk/2)*fn1
-                    mq.AddTerm(Lk / 2.0, fn1);
-
-                    model.AddQConstr(mq == 0.0, $"MomentEq_face_{face.Id}");
-               }
-
-                    // 6) Strength limit constraints, if sigmaC > 0 and thickness > 0
-                    //    eK + fnk/(2*sigmaC*t_k) <= Lk/2
-                    //    eK - fnk/(2*sigmaC*t_k) >= -Lk/2
-                    if (sigmaC > 1e-9 && t_k > 1e-9)
-               {
+                // 6) Strength limit constraints, if sigmaC > 0 and thickness > 0
+                // 4) Strength limit constraints
+                double t_k = face.Thickness;
+                if (sigmaC > 1e-9 && t_k > 1e-9)
+                {
                     double denom = 2.0 * sigmaC * t_k;
 
+                    // eK + fnk/denom <= Lk/2
                     {
-                    // eK + (1/denom)*fnk <= Lk/2
-                    GRBLinExpr lhsUp = 0.0;
-                    lhsUp.AddTerm(1.0, eK);
-                    lhsUp.AddTerm(1.0 / denom, fnk);
-                    model.AddConstr(lhsUp <= Lk / 2.0, $"StrengthUp_{face.Id}");
+                        GRBLinExpr lhsUp = 0.0;
+                        lhsUp.AddTerm(1.0, eK);
+                        lhsUp.AddTerm(1.0 / denom, fnk);
+                        model.AddConstr(lhsUp <= Lk / 2.0, $"StrengthUp_face{face.Id}");
                     }
+
+                    // eK - fnk/denom >= -Lk/2
                     {
-                    // eK - (1/denom)*fnk >= -Lk/2
-                    GRBLinExpr lhsLo = 0.0;
-                    lhsLo.AddTerm(1.0, eK);
-                    lhsLo.AddTerm(-1.0 / denom, fnk);
-                    model.AddConstr(lhsLo >= -Lk / 2.0, $"StrengthLo_{face.Id}");
+                        GRBLinExpr lhsLo = 0.0;
+                        lhsLo.AddTerm(1.0, eK);
+                        lhsLo.AddTerm(-1.0 / denom, fnk);
+                        model.AddConstr(lhsLo >= -Lk / 2.0, $"StrengthLo_face{face.Id}");
                     }
-               }
+                }
             }
         }
 
@@ -489,9 +495,9 @@ namespace InterlockingMasonryLocalForces
             try
             {
                 // 1) Create ProblemData and load eternal files 
-                ProblemData pData = new ProblemData();
+                ProblemData data = new ProblemData();
                 string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_parallel.txt";
-                LoadMatrixAndVector(pData, matrixFilePath);
+                LoadMatrixAndVector(data, matrixFilePath);
 
                 // 2) Create a geometry
                 GeometryModel geometry = new GeometryModel();
@@ -515,7 +521,7 @@ namespace InterlockingMasonryLocalForces
 
                 // 5) Solve with the local approach
                 LocalOptimizer optimizer = new LocalOptimizer();
-                optimizer.SolveProblem(geometry, pData);
+                optimizer.SolveProblem(geometry, data);
             }
             catch (Exception ex)
             {
@@ -526,7 +532,7 @@ namespace InterlockingMasonryLocalForces
         }  // end of Main
 
         // load   Matrix A and Vector B from the specified format
-        static void LoadMatrixAndVector(ProblemData pData, string filePath)
+        static void LoadMatrixAndVector(ProblemData data, string filePath)
         {
             Console.WriteLine($"Loading matrix A, vector B from: {filePath}");
             if (!File.Exists(filePath)) throw new FileNotFoundException(filePath);
@@ -534,11 +540,13 @@ namespace InterlockingMasonryLocalForces
             bool readingMatrixSize = false;
             bool readingMatrixValues = false;
             bool readingVectorValues = false;
+            bool readingGValues = false;
             int sizeLinesRead = 0;
 
             int n_local = 0, p_local = 0;
             List<double> matrixAValues = new List<double>();
             List<double> vectorBValues = new List<double>();
+            List<double> gravityValues = new List<double>();
 
             var lines = File.ReadAllLines(filePath);
             for (int i = 0; i < lines.Length; i++)
@@ -567,6 +575,14 @@ namespace InterlockingMasonryLocalForces
                     readingVectorValues = true;
                     continue;
                 }
+                if (line == "vector_G_values")
+                {
+                    readingMatrixSize = false;
+                    readingMatrixValues = false;
+                    readingVectorValues = false;
+                    readingGValues = true;
+                    continue;
+                }
                 // parse lines based on flags
                 if (readingMatrixSize)
                 {
@@ -580,7 +596,7 @@ namespace InterlockingMasonryLocalForces
                         if (n_local <= 0 || p_local <= 0)
                             throw new InvalidDataException("Invalid matrix dimensions read.");
 
-                        pData.MatrixA = new double[n_local, p_local];
+                        data.MatrixA = new double[n_local, p_local];
                         Console.WriteLine($"Matrix dimension: {n_local} x {p_local}");
                         readingMatrixSize = false;
                     }
@@ -607,52 +623,67 @@ namespace InterlockingMasonryLocalForces
                         vectorBValues.Add(val);
                     }
                 }
-            }
-
-            // Fill pData.MatrixA
-            if (pData.MatrixA == null)
-                throw new InvalidDataException("Matrix A not allocated. Did we miss 'matrix_A_size' lines?");
-
-            if (matrixAValues.Count != (pData.MatrixA.GetLength(0) * pData.MatrixA.GetLength(1)))
-                throw new InvalidDataException("Mismatch in # of matrix A values vs. dimension.");
-
-            int idx = 0;
-            for (int r = 0; r < pData.MatrixA.GetLength(0); r++)
-            {
-                for (int c = 0; c < pData.MatrixA.GetLength(1); c++)
+                else if (readingGValues)
                 {
-                    pData.MatrixA[r, c] = matrixAValues[idx++];
+                    var parts = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var part in parts)
+                    {
+                        if (!double.TryParse(part, NumberStyles.Any, CultureInfo.InvariantCulture, out double val))
+                            throw new InvalidDataException($"Could not parse gravity G value '{part}' on line {i + 1}.");
+                        gravityValues.Add(val);
+                    }
                 }
-            }
+                
+                // Fill data.MatrixA
+                if (data.MatrixA == null)
+                    throw new InvalidDataException("Matrix A not allocated. Did we miss 'matrix_A_size' lines?");
 
-            // Fill pData.VectorB
-            if (vectorBValues.Count == 0)
-                throw new InvalidDataException("No vector B values found in file.");
+                if (matrixAValues.Count != (data.MatrixA.GetLength(0) * data.MatrixA.GetLength(1)))
+                    throw new InvalidDataException("Mismatch in # of matrix A values vs. dimension.");
 
-            if (vectorBValues.Count != pData.MatrixA.GetLength(0))
-            {
-                Console.WriteLine($"Warning: #B-values={vectorBValues.Count}, expected {pData.MatrixA.GetLength(0)}. Using them anyway...");
-            }
-
-            pData.VectorB = vectorBValues.ToArray();
-
-            Console.WriteLine("Matrix A and Vector B loaded successfully.");
-
-            // CHECK first few rows and columns of A
-            Console.WriteLine("Some rows of Matrix A:");
-            int numRowsToPrint = Math.Min(5, pData.NumRows);   // e.g., print up to 5 rows
-            int numColsToPrint = Math.Min(15, pData.NumCols);   // e.g., print up to 5 columns
-            for (int r = 0; r < numRowsToPrint; r++)
-            {
-                string rowStr = "";
-                for (int c = 0; c < numColsToPrint; c++)
+                int idx = 0;
+                for (int r = 0; r < data.MatrixA.GetLength(0); r++)
                 {
-                    rowStr += pData.MatrixA[r, c].ToString("F3") + " ";
+                    for (int c = 0; c < data.MatrixA.GetLength(1); c++)
+                    {
+                        data.MatrixA[r, c] = matrixAValues[idx++];
+                    }
                 }
-                Console.WriteLine($"Row {r}: {rowStr}");
+
+                // Fill data.VectorB
+                if (vectorBValues.Count == 0)
+                    throw new InvalidDataException("No vector B values found in file.");
+
+                if (vectorBValues.Count != data.MatrixA.GetLength(0))
+                {
+                    Console.WriteLine($"Warning: #B-values={vectorBValues.Count}, expected {data.MatrixA.GetLength(0)}. Using them anyway...");
+                }
+                data.VectorB = vectorBValues.ToArray();
+
+                // Fill data.G
+                if (gravityValues.Count != data.MatrixA.GetLength(0))
+                {
+                    Console.WriteLine($"Warning: #G-values={gravityValues.Count}, expected {data.MatrixA.GetLength(0)}. Using them anyway...");
+                }
+                data.G = gravityValues.ToArray();
+
+                Console.WriteLine("Matrix A, Vector B, and Gravity G loaded successfully.");
+
+                // CHECK first few rows and columns of A
+                Console.WriteLine("Some rows of Matrix A:");
+                int numRowsToPrint = Math.Min(5, data.NumRows);   // e.g., print up to 5 rows
+                int numColsToPrint = Math.Min(15, data.NumCols);   // e.g., print up to 5 columns
+                for (int r = 0; r < numRowsToPrint; r++)
+                {
+                    string rowStr = "";
+                    for (int c = 0; c < numColsToPrint; c++)
+                    {
+                        rowStr += data.MatrixA[r, c].ToString("F3") + " ";
+                    }
+                    Console.WriteLine($"Row {r}: {rowStr}");
+                }
             }
         }
-
 
         // Load Faces from file:   Format (per line): faceID, length, thickness, cohesionFlag, vertex1, vertex2, ...
         static void LoadFacesFromFile(GeometryModel geometry, string faceFilePath)
