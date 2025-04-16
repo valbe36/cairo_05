@@ -17,7 +17,7 @@ Input Files:
    vector_B_values
    [n values...]
 2. Face Geometry File (*.txt):
-   Format (per line): # faceId,faceID, length, thickness, cohesionFlag, vertex1, vertex2 .
+   Format (per line):   faceID, length, thickness, cohesionFlag, vertex1, vertex2, ....
        # lines are disregarded
 
 */
@@ -42,7 +42,7 @@ namespace InterlockingMasonryLocalForces
 
         // friction, compressive strength, etc.
         public double Mu { get; set; } = 0.4;    // friction
-        public double SigmaC { get; set; } = 20000;  // compressive strength
+        public double SigmaC { get; set; } = 56000;  // compressive strength
         // For partial contact: thickness, etc., read from Face definitions.
         public double Cohesion { get; set; } = 0.0;
     }
@@ -108,7 +108,7 @@ namespace InterlockingMasonryLocalForces
 
         private int FindFaceVertexPairIndex(int faceId, int vertexId)
         {
-            // faceVertexPairs is your List<FaceVertexPair>, presumably defined as a field in this class
+            // faceVertexPairs is  List<FaceVertexPair>, presumably defined as a field in this class
             for (int j = 0; j < faceVertexPairs.Count; j++)
             {
                 var pair = faceVertexPairs[j];
@@ -333,7 +333,7 @@ namespace InterlockingMasonryLocalForces
                 model.AddQConstr(mq == 0.0, $"MomentEq_face{face.Id}");
 
                 //    fnk * eK = (fn2 - fn1)*(Lk/2) => fnk*eK - (Lk/2)*fn2 + (Lk/2)*fn1 == 0
-                // 6) Strength limit constraints, if sigmaC > 0 and thickness > 0
+                //  Strength limit constraints, if sigmaC > 0 and thickness > 0
                 // 4) Strength limit constraints
                 double t_k = face.Thickness;
                 if (sigmaC > 1e-9 && t_k > 1e-9)
@@ -371,7 +371,7 @@ namespace InterlockingMasonryLocalForces
             return -1;
         }
 
-        /// Example of printing the solution
+        ///  printing the solution
         private void PrintSolution(GRBModel model)
         {
             int status = model.Status;
@@ -496,14 +496,14 @@ namespace InterlockingMasonryLocalForces
             {
                 // 1) Create ProblemData and load eternal files 
                 ProblemData data = new ProblemData();
-                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_parallel.txt";
+                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_cairo.txt";
                 LoadMatrixAndVector(data, matrixFilePath);
 
                 // 2) Create a geometry
                 GeometryModel geometry = new GeometryModel();
 
                 // faces
-                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_parallel.txt";
+                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_cairo.txt";
                 LoadFacesFromFile(geometry, faceFilePath);
                 if (!string.IsNullOrEmpty(faceFilePath))
                 {
