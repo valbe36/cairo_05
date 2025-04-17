@@ -42,9 +42,8 @@ namespace InterlockingMasonryLocalForces
 
         // friction, compressive strength, etc.
         public double Mu { get; set; } = 0.4;    // friction
-        public double SigmaC { get; set; } = 56000;  // compressive strength
+        public double SigmaC { get; set; } = 8200;  // compressive strength
         // For partial contact: thickness, etc., read from Face definitions.
-        public double Cohesion { get; set; } = 0.0;
     }
 
     /// Represents a single contact point (vertex).
@@ -57,14 +56,12 @@ namespace InterlockingMasonryLocalForces
     public class Face
     {
         public int Id { get; set; }
-        public double Length { get; set; }
+        public double Depth { get; set; }
         public double Thickness { get; set; }
 
         // If you want a boolean for cohesion
-        public bool HasCohesion { get; set; } = false;
+        public double CohesionValue { get; set; }
 
-        // Possibly store a "CohesionValue" if you want different c for each face
-        // public double CohesionValue { get; set; } = 0.0;
         public List<int> VertexIds { get; set; } = new List<int>();
     }
 
@@ -255,30 +252,33 @@ namespace InterlockingMasonryLocalForces
             {
                 Face face = kvp.Value;
                 if (face.VertexIds.Count < 2)
-                    continue; // skip if <2 vertices
+                    continue; // skip if face has <2 vertices (unexpected)
+
+
+                // Use face-specific cohesion value 
+                double cohesion = face.CohesionValue;
+                double contactArea = face.Thickness * face.Depth;
 
                 foreach (int vId in face.VertexIds)
                 {
                     int pairIndex = FindFaceVertexPairIndex(face.Id, vId);
                     if (pairIndex < 0)
                     {
-                        Console.WriteLine($"No face‐vertex pair index found for face={face.Id}, vId={vId}!");
+                        Console.WriteLine($"Warning: Missing face-vertex pair index for face={face.Id}, vertex={vId}");
                         continue;
                     }
 
-                    // fN, fT
                     GRBVar fN = fAll[2 * pairIndex];
                     GRBVar fT = fAll[2 * pairIndex + 1];
 
-                    // Possibly apply cohesion if face.HasCohesion
-                    double cVal = face.HasCohesion ? data.Cohesion : 0.0;
-                    double area = face.Thickness; // or thickness*someDepth
+                    // Split cohesion contribution across the two vertices
+                    double cohesionShare = 0.5 * cohesion * contactArea;
 
-                    // friction w/ cohesion
-                    model.AddConstr(fT <= mu * fN + cVal * area, $"FricPos_{face.Id}_{vId}");
-                    model.AddConstr(fT >= -(mu * fN + cVal * area), $"FricNeg_{face.Id}_{vId}");
+                    // Frictional constraints with cohesion
+                    model.AddConstr(fT <= mu * fN + cohesionShare, $"FricPos_{face.Id}_{vId}");
+                    model.AddConstr(fT >= -(mu * fN + cohesionShare), $"FricNeg_{face.Id}_{vId}");
 
-                    // optional no‐tension
+                    // No tension constraint
                     model.AddConstr(fN >= 0.0, $"NoTension_{face.Id}_{vId}");
                 }
             }
@@ -320,7 +320,7 @@ namespace InterlockingMasonryLocalForces
                     model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
                 }
 
-                double Lk = face.Length;
+                double Lk = face.Depth;
                 GRBVar eK = model.AddVar(-Lk / 2.0, Lk / 2.0, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
 
                 faceEccVars[face.Id] = eK;
@@ -633,7 +633,7 @@ namespace InterlockingMasonryLocalForces
                         gravityValues.Add(val);
                     }
                 }
-                
+            }
                 // Fill data.MatrixA
                 if (data.MatrixA == null)
                     throw new InvalidDataException("Matrix A not allocated. Did we miss 'matrix_A_size' lines?");
@@ -682,7 +682,7 @@ namespace InterlockingMasonryLocalForces
                     }
                     Console.WriteLine($"Row {r}: {rowStr}");
                 }
-            }
+           
         }
 
         // Load Faces from file:   Format (per line): faceID, length, thickness, cohesionFlag, vertex1, vertex2, ...
@@ -710,7 +710,7 @@ namespace InterlockingMasonryLocalForces
 
                 // Split by comma
                 string[] parts = line.Split(',');
-                // We expect at least 5 columns for: faceID, length, thickness, cohesionFlag, plus >=1 vertex
+                // We expect at least 5 columns for: faceID, length, thickness, cohesionValue, plus >=1 vertex
                 if (parts.Length < 5)
                 {
                     Console.WriteLine($"Warning: line {lineNo}, expected at least 5 columns. Found {parts.Length}. Skipping this line.");
@@ -733,9 +733,10 @@ namespace InterlockingMasonryLocalForces
                     Console.WriteLine($"Could not parse face thickness at line {lineNo}. Skipping.");
                     continue;
                 }
-                if (!int.TryParse(parts[3], out int cohesionFlag))
+
+                if (!double.TryParse(parts[3], NumberStyles.Any, CultureInfo.InvariantCulture, out double cohesionValue))
                 {
-                    Console.WriteLine($"Could not parse cohesionFlag at line {lineNo}. Skipping.");
+                    Console.WriteLine($"Could not parse cohesion value at line {lineNo}. Skipping.");
                     continue;
                 }
 
@@ -757,22 +758,22 @@ namespace InterlockingMasonryLocalForces
                     Console.WriteLine($"Warning: face {faceId} has fewer than 2 vertices listed. This might cause issues. We proceed anyway.");
                 }
 
-                // 3) Create the Face object
-                Face newFace = new Face
-                {
-                    Id = faceId,
-                    Length = faceLength,
-                    Thickness = faceThickness,
-                    HasCohesion = (cohesionFlag == 1), // or store a double Cohesion if you want
-                    VertexIds = vertexList,
-                };
-
-                // Check for duplicate face ID
+                // Create and register the Face object
                 if (geometry.Faces.ContainsKey(faceId))
                 {
                     Console.WriteLine($"Warning: face ID={faceId} already exists, skipping duplicate line {lineNo}.");
                     continue;
                 }
+
+                // 3) Create the Face object
+                Face newFace = new Face
+                {
+                    Id = faceId,
+                    Depth = faceLength,
+                    Thickness = faceThickness,
+                    CohesionValue = cohesionValue,
+                    VertexIds = vertexList,
+                };
 
                 geometry.Faces.Add(faceId, newFace);
             }
@@ -784,7 +785,7 @@ namespace InterlockingMasonryLocalForces
             {
                 var f = kvp.Value;
                 string vStr = string.Join(",", f.VertexIds);
-                Console.WriteLine($"Face ID={f.Id}, L={f.Length:F3}, t={f.Thickness:F3}, HasCoh={f.HasCohesion}, Vertices=[{vStr}]");
+                Console.WriteLine($"Face ID={f.Id}, L={f.Depth:F3}, t={f.Thickness:F3},Cohesion={f.CohesionValue:F3}, Vertices=[{vStr}]");
             }
         }
         
