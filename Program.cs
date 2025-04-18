@@ -240,10 +240,9 @@ namespace InterlockingMasonryLocalForces
                 }
             }
 
-        /// <summary>
+
         /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
         /// plus no tension fN_j >= 0 (already in the variable bound).
-        /// </summary>
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             double mu = data.Mu;
@@ -476,6 +475,35 @@ namespace InterlockingMasonryLocalForces
                     writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3}");
                 }
 
+                // 3) Compute and save total forces per face
+                writer.WriteLine();
+                writer.WriteLine("=== Face-level Total Forces ===");
+
+                var faceTotalForces = new Dictionary<int, (double fnSum, double ftSum)>();
+
+                for (int j = 0; j < faceVertexPairs.Count; j++)
+                {
+                    int indexFn = 2 * j;
+                    int indexFt = 2 * j + 1;
+
+                    double fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
+                    double ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
+
+                    var pair = faceVertexPairs[j]; // (faceId, vertexId)
+
+                    if (!faceTotalForces.ContainsKey(pair.FaceId))
+                        faceTotalForces[pair.FaceId] = (0.0, 0.0);
+
+                    var current = faceTotalForces[pair.FaceId];
+                    faceTotalForces[pair.FaceId] = (current.fnSum + fnVal, current.ftSum + ftVal);
+                }
+
+                // Write totals
+                foreach (var kvp in faceTotalForces)
+                {
+                    writer.WriteLine($"Face {kvp.Key}: total_fn = {kvp.Value.fnSum:F3}, total_ft = {kvp.Value.ftSum:F3}");
+                }
+
             }
 
             Console.WriteLine($"Results saved to {resultsFilePath}");
@@ -496,14 +524,14 @@ namespace InterlockingMasonryLocalForces
             {
                 // 1) Create ProblemData and load eternal files 
                 ProblemData data = new ProblemData();
-                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_cairo.txt";
+                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_parallel.txt";
                 LoadMatrixAndVector(data, matrixFilePath);
 
                 // 2) Create a geometry
                 GeometryModel geometry = new GeometryModel();
 
                 // faces
-                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_cairo.txt";
+                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_parallel.txt";
                 LoadFacesFromFile(geometry, faceFilePath);
                 if (!string.IsNullOrEmpty(faceFilePath))
                 {
