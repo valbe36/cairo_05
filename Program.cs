@@ -1,5 +1,8 @@
 ﻿using System.Globalization;
 using Gurobi;
+using System.IO; 
+using System.Collections.Generic;
+
 /*
 Mathematical programming model for masonry stability check.
 Primary variables: fx[i], fy[i] (global forces at vertex i).
@@ -17,7 +20,7 @@ Input Files:
    vector_B_values
    [n values...]
 2. Face Geometry File (*.txt):
-   Format (per line):   faceID, length, thickness, cohesionFlag, vertex1, vertex2, ....
+   Format (per line):   faceID, length, thickness, cohesion, friction, vertex1, vertex2.
        # lines are disregarded
 
 */
@@ -59,8 +62,8 @@ namespace InterlockingMasonryLocalForces
         public double Depth { get; set; }
         public double Thickness { get; set; }
 
-        // If you want a boolean for cohesion
         public double CohesionValue { get; set; }
+        public double? MuOverride { get; set; }
 
         public List<int> VertexIds { get; set; } = new List<int>();
     }
@@ -93,27 +96,18 @@ namespace InterlockingMasonryLocalForces
     {
             // We'll store the list of face-vertex pairs, in order
             private List<FaceVertexPair> faceVertexPairs;
-
+            private GeometryModel _geometry;
             // Gurobi variable array (size = 2 * faceVertexPairs.Count):
             // the even indices are f_n, the odd are f_t, for that pair.
             private GRBVar[] fAll;
             private GRBVar lambda;
             //  storing Gurobi variables (eccVars) mapped by faceId
             private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
-            // Similarly,  face-level normal sums
-            private Dictionary<int, GRBVar> faceFnkVars = new Dictionary<int, GRBVar>();
-
-        private int FindFaceVertexPairIndex(int faceId, int vertexId)
-        {
-            // faceVertexPairs is  List<FaceVertexPair>, presumably defined as a field in this class
-            for (int j = 0; j < faceVertexPairs.Count; j++)
-            {
-                var pair = faceVertexPairs[j];
-                if (pair.FaceId == faceId && pair.VertexId == vertexId)
-                    return j;
-            }
-            return -1; // not found
-        }
+            // maps (faceId, vertexId) -> pair index
+            private Dictionary<(int face, int vtx), int> pairIndexMap;
+          
+        private int GetPairIndex(int faceId, int vertexId) =>
+            pairIndexMap.TryGetValue((faceId, vertexId), out int idx) ? idx : -1;
 
         /// The main solve routine
         public void SolveProblem(GeometryModel geometry, ProblemData data)
@@ -137,8 +131,16 @@ namespace InterlockingMasonryLocalForces
                     return cmp;
                 });
 
-                // 2) Make Gurobi environment and model
-                using (GRBEnv env = new GRBEnv(true))
+                pairIndexMap = new Dictionary<(int, int), int>(faceVertexPairs.Count);
+                for (int j = 0; j < faceVertexPairs.Count; j++)
+                {
+                var p = faceVertexPairs[j];
+                pairIndexMap[(p.FaceId, p.VertexId)] = j;
+                }
+
+            _geometry = geometry;
+            // 2) Make Gurobi environment and model
+            using (GRBEnv env = new GRBEnv(true))
                 {
                     env.Start();
                     using (GRBModel model = new GRBModel(env))
@@ -162,9 +164,10 @@ namespace InterlockingMasonryLocalForces
                         obj.AddTerm(1.0, lambda);
                         model.SetObjective(obj, GRB.MAXIMIZE);
                         model.Write("debugModel.lp");
-                       
-                        // 8) Solve
-                        model.Optimize();
+                        DumpColumnMap(data);
+
+                    // 8) Solve
+                    model.Optimize();
                         SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results.txt");
                     // 9) Print solution
                     PrintSolution(model);
@@ -245,40 +248,39 @@ namespace InterlockingMasonryLocalForces
         /// plus no tension fN_j >= 0 (already in the variable bound).
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
-            double mu = data.Mu;
-
-            foreach (var kvp in geometry.Faces)
+            foreach (var kvp in geometry.Faces)        // <‑‑ loop defines kvp
             {
                 Face face = kvp.Value;
-                if (face.VertexIds.Count < 2)
-                    continue; // skip if face has <2 vertices (unexpected)
+                double mu = face.MuOverride ?? data.Mu;   // per‑face or default
 
+                // If mu‑value ≤ 0  ⇒ treat as perfectly smooth face
+                bool frictionless = mu <= 0.0;
 
-                // Use face-specific cohesion value 
-                double cohesion = face.CohesionValue;
-                double contactArea = face.Thickness * face.Depth;
+                double area = face.Thickness * face.Depth;
+                double cohShare = 0.5 * face.CohesionValue * area;   // kN
 
                 foreach (int vId in face.VertexIds)
                 {
-                    int pairIndex = FindFaceVertexPairIndex(face.Id, vId);
-                    if (pairIndex < 0)
-                    {
-                        Console.WriteLine($"Warning: Missing face-vertex pair index for face={face.Id}, vertex={vId}");
-                        continue;
-                    }
+                    int idx = GetPairIndex(face.Id, vId);
+                    if (idx < 0) continue;       // safety
 
-                    GRBVar fN = fAll[2 * pairIndex];
-                    GRBVar fT = fAll[2 * pairIndex + 1];
+                    GRBVar fN = fAll[2 * idx];        // normal
+                    GRBVar fT = fAll[2 * idx + 1];    // tangential
 
-                    // Split cohesion contribution across the two vertices
-                    double cohesionShare = 0.5 * cohesion * contactArea;
-
-                    // Frictional constraints with cohesion
-                    model.AddConstr(fT <= mu * fN + cohesionShare, $"FricPos_{face.Id}_{vId}");
-                    model.AddConstr(fT >= -(mu * fN + cohesionShare), $"FricNeg_{face.Id}_{vId}");
-
-                    // No tension constraint
+                    //  No‑tension bound (compression only)
                     model.AddConstr(fN >= 0.0, $"NoTension_{face.Id}_{vId}");
+
+                    if (frictionless)
+                    {
+                        // shear must vanish
+                        model.AddConstr(fT == 0.0, $"NoFric_{face.Id}_{vId}");
+                    }
+                    else
+                    {
+                        // Mohr‑Coulomb with cohesion
+                        model.AddConstr(fT <= mu * fN + cohShare, $"Fric+_{face.Id}_{vId}");
+                        model.AddConstr(fT >= -mu * fN - cohShare, $"Fric-_{face.Id}_{vId}");
+                    }
                 }
             }
         }
@@ -297,9 +299,10 @@ namespace InterlockingMasonryLocalForces
                 int v1 = face.VertexIds[0];
                 int v2 = face.VertexIds[1];
 
-                // 1) Find the local indices in faceVertexPairs
-                int idx1 = FindFaceVertexPairIndex(face.Id, v1);
-                int idx2 = FindFaceVertexPairIndex(face.Id, v2);
+                // 1) Find the local pair indices
+                int idx1 = GetPairIndex(face.Id, v1);
+                int idx2 = GetPairIndex(face.Id, v2);
+
                 if (idx1 < 0 || idx2 < 0)
                 {
                     // cannot proceed if the face–vertex pair wasn't found
@@ -358,16 +361,23 @@ namespace InterlockingMasonryLocalForces
             }
         }
 
-        /// Find the index j in faceVertexPairs for (faceId, vertexId).
-        private int FindFaceVertexIndex(int faceId, int vertexId)
+        private void DumpColumnMap(ProblemData data)
         {
+            string path = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\mapping.txt";          // choose any writable folder
+            using var w = new StreamWriter(path);
+
+            w.WriteLine("col | face vertex | A[0,col]");
+            w.WriteLine("-------------------------------");
+
             for (int j = 0; j < faceVertexPairs.Count; j++)
             {
-                var fv = faceVertexPairs[j];
-                if (fv.FaceId == faceId && fv.VertexId == vertexId)
-                    return j;
+                var p = faceVertexPairs[j];
+                double a0 = data.MatrixA[0, j];            // sample entry from row 0
+
+                w.WriteLine($"{j,3} | {p.FaceId,4} {p.VertexId,6} | {a0,10:F3}");
             }
-            return -1;
+
+            Console.WriteLine($"Column map dumped to {path}");
         }
 
         ///  printing the solution
@@ -466,16 +476,21 @@ namespace InterlockingMasonryLocalForces
                     writer.WriteLine($"Face {pair.FaceId}, Vertex {pair.VertexId}: " +
                                      $"fn={fnVal:F3}, ft={ftVal:F3}");
                 }
-                // 4) If we have face eccentricities, print them too
+                
+                
+                // 3) If we have face eccentricities, print them too
                 foreach (var kvp in faceEccVars)
                 {
                     int faceId = kvp.Key;
                     GRBVar eccVar = kvp.Value;
                     double eccVal = eccVar.X;  // or eccVar.Get(GRB.DoubleAttr.X)
                     writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3}");
+
+                    double halfDepth = _geometry.Faces[faceId].Depth / 2.0;
+                    writer.WriteLine($"Face {faceId}: eccentricity ratio = {eccVal / halfDepth:F3}");
                 }
 
-                // 3) Compute and save total forces per face
+                // 4) Compute and save total forces per face
                 writer.WriteLine();
                 writer.WriteLine("=== Face-level Total Forces ===");
 
@@ -498,6 +513,8 @@ namespace InterlockingMasonryLocalForces
                     faceTotalForces[pair.FaceId] = (current.fnSum + fnVal, current.ftSum + ftVal);
                 }
 
+
+                
                 // Write totals
                 foreach (var kvp in faceTotalForces)
                 {
@@ -524,14 +541,14 @@ namespace InterlockingMasonryLocalForces
             {
                 // 1) Create ProblemData and load eternal files 
                 ProblemData data = new ProblemData();
-                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_parallel.txt";
+                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_cairo.txt";
                 LoadMatrixAndVector(data, matrixFilePath);
 
                 // 2) Create a geometry
                 GeometryModel geometry = new GeometryModel();
 
                 // faces
-                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_parallel.txt";
+                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_cairo.txt";
                 LoadFacesFromFile(geometry, faceFilePath);
                 if (!string.IsNullOrEmpty(faceFilePath))
                 {
@@ -543,10 +560,11 @@ namespace InterlockingMasonryLocalForces
                     Console.WriteLine("No face file. Skipping face constraints entirely.");
                 }
 
-
                 // 4) Possibly ensure we have all vertices that appear in faces
                 AutoPopulateVertices(geometry);
 
+                DumpFaceData(geometry, "interlocking");   // or "plain", etc.
+                 
                 // 5) Solve with the local approach
                 LocalOptimizer optimizer = new LocalOptimizer();
                 optimizer.SolveProblem(geometry, data);
@@ -768,9 +786,16 @@ namespace InterlockingMasonryLocalForces
                     continue;
                 }
 
+                if (!double.TryParse(parts[4], NumberStyles.Any, CultureInfo.InvariantCulture,
+                     out double muOverride))
+                {
+                    Console.WriteLine($"Could not parse mu at line {lineNo}.  Using default.");
+                    muOverride = double.NaN;      // interpreted as “null” below
+                }
+
                 // 2) Extract the vertex IDs from the remaining fields
                 var vertexList = new List<int>();
-                for (int i = 4; i < parts.Length; i++)
+                for (int i = 5; i < parts.Length; i++)
                 {
                     if (int.TryParse(parts[i], out int vId))
                     {
@@ -800,7 +825,8 @@ namespace InterlockingMasonryLocalForces
                     Depth = faceLength,
                     Thickness = faceThickness,
                     CohesionValue = cohesionValue,
-                    VertexIds = vertexList,
+                    MuOverride = double.IsNaN(muOverride) ? null : muOverride,
+                    VertexIds = vertexList
                 };
 
                 geometry.Faces.Add(faceId, newFace);
@@ -808,13 +834,6 @@ namespace InterlockingMasonryLocalForces
 
             Console.WriteLine($"Done loading faces. Found total {geometry.Faces.Count} faces.");
 
-            // Quick listing:
-            foreach (var kvp in geometry.Faces)
-            {
-                var f = kvp.Value;
-                string vStr = string.Join(",", f.VertexIds);
-                Console.WriteLine($"Face ID={f.Id}, L={f.Depth:F3}, t={f.Thickness:F3},Cohesion={f.CohesionValue:F3}, Vertices=[{vStr}]");
-            }
         }
         
         // Insert vertices if not already present
@@ -832,6 +851,19 @@ namespace InterlockingMasonryLocalForces
             }
             Console.WriteLine($"AutoPopulateVertices: now have {geometry.Vertices.Count} vertices in the model.");
         }
+
+        static void DumpFaceData(GeometryModel g, string tag)
+        {
+            Console.WriteLine($"\n--- {tag} ---");
+            foreach (var f in g.Faces.Values.OrderBy(f => f.Id))
+            {
+                double mu = f.MuOverride ?? 0.4;
+                Console.WriteLine($"Face {f.Id}: L={f.Depth}  t={f.Thickness}  µ={mu}  c={f.CohesionValue}");
+            }
+        }
+
+
+
 
     } // end of Program
 } //end namespace
