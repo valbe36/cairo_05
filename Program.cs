@@ -168,7 +168,7 @@ namespace InterlockingMasonryLocalForces
 
                     // 8) Solve
                     model.Optimize();
-                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results.txt");
+                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt");
                     // 9) Print solution
                     PrintSolution(model);
 
@@ -541,7 +541,7 @@ namespace InterlockingMasonryLocalForces
             {
                 // 1) Create ProblemData and load eternal files 
                 ProblemData data = new ProblemData();
-                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_cairo.txt";
+                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\output_cairo.txt"; // matrix_A_cairo.txt";
                 LoadMatrixAndVector(data, matrixFilePath);
 
                 // 2) Create a geometry
