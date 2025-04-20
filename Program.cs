@@ -168,7 +168,7 @@ namespace InterlockingMasonryLocalForces
 
                     // 8) Solve
                     model.Optimize();
-                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt");
+                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_parallel_friction_0e09.txt");
                     // 9) Print solution
                     PrintSolution(model);
 
@@ -486,8 +486,8 @@ namespace InterlockingMasonryLocalForces
                     double eccVal = eccVar.X;  // or eccVar.Get(GRB.DoubleAttr.X)
                     writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3}");
 
-                    double halfDepth = _geometry.Faces[faceId].Depth / 2.0;
-                    writer.WriteLine($"Face {faceId}: eccentricity ratio = {eccVal / halfDepth:F3}");
+                    // double halfDepth = _geometry.Faces[faceId].Depth / 2.0;
+                   // writer.WriteLine($"Face {faceId}: eccentricity ratio = {eccVal / halfDepth:F3}");
                 }
 
                 // 4) Compute and save total forces per face
@@ -541,14 +541,14 @@ namespace InterlockingMasonryLocalForces
             {
                 // 1) Create ProblemData and load eternal files 
                 ProblemData data = new ProblemData();
-                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\matrix_A_cairo.txt"; // matrix_A_cairo.txt";
+                string matrixFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\output_parallel.txt"; // matrix_A_cairo.txt";
                 LoadMatrixAndVector(data, matrixFilePath);
 
                 // 2) Create a geometry
                 GeometryModel geometry = new GeometryModel();
 
                 // faces
-                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_cairo.txt";
+                string faceFilePath = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\face_parallel_friction_0e09.txt";
                 LoadFacesFromFile(geometry, faceFilePath);
                 if (!string.IsNullOrEmpty(faceFilePath))
                 {
