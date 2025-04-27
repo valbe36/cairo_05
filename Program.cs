@@ -55,7 +55,9 @@ namespace InterlockingMasonryLocalForces
         public int Id { get; set; }
     }
 
-    /// Represents a 2D contact face, assumed 2 vertexes, but adaptable
+    /// Represents a 2D contact face, assumed 2 vertexes, but adaptable  <summary>
+    ///   faceID, length, thickness, cohesion, friction, normalX, normalY, vertex1, vertex2
+    /// </summary>
     public class Face
     {
         public int Id { get; set; }
@@ -64,7 +66,13 @@ namespace InterlockingMasonryLocalForces
 
         public double CohesionValue { get; set; }
         public double? MuOverride { get; set; }
+    
+        public double NormalX { get; set; }
+        public double NormalY { get; set; }
 
+        // Add tangential direction (if needed)
+        public double TangentX { get; set; }
+        public double TangentY { get; set; }
         public List<int> VertexIds { get; set; } = new List<int>();
     }
 
