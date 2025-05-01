@@ -787,11 +787,6 @@ namespace InterlockingMasonryLocalForces
                     case "[Faces]":
                         if (trimmedLine.StartsWith("FaceID")) continue;
                         var faceParts = trimmedLine.Split(',');
-                        if (faceParts.Length < 13)
-                        {
-                            Console.WriteLine($"Line {lineNo}: Insufficient face data. Skipping.");
-                            continue;
-                        }
 
                         // Parse basic face properties
                         Face face = new Face
@@ -852,8 +847,41 @@ namespace InterlockingMasonryLocalForces
 
                 data.B = vectorB.ToArray();
                 data.G = vectorG.ToArray();
+
+
+                // Cross-check: Number of faces should be equal to number of columns in the matrix divided by 4
+                // Each face has 2 vertices, and for each face-vertex pair, there are 2 variables (fN and fT)
+                // Total variables = number of face-vertex pairs * 2 = geometry.Faces.Count * 2 * 2
+                int expectedNumVariables = geometry.Faces.Count * 2 * 2;
+
+                // Assuming the matrix A will be built later and will have columns equal to the number of variables
+                //  placeholder for the actual number of variables
+                int actualNumVariables = data.NumCols;
+                if (actualNumVariables != expectedNumVariables)
+                {
+                    Console.WriteLine($"Warning: The number of variables ({actualNumVariables}) does not match the expected number ({expectedNumVariables}). Please check data consistency.");
+                }
+
+                // Similarly,  cross-check the number of faces with the number of vertices / 2
+                int expectedNumFacesFromVertices = geometry.Vertices.Count / 2;
+                if (geometry.Faces.Count != expectedNumFacesFromVertices)
+                {
+                    Console.WriteLine($"Warning: Number of faces ({geometry.Faces.Count}) does not equal number of vertices / 2 ({expectedNumFacesFromVertices}). Please verify your data.");
+                }
+
+                // Y output the counts for verification
+                Console.WriteLine($"Loaded {geometry.Blocks.Count} blocks.");
+                Console.WriteLine($"Loaded {geometry.Vertices.Count} vertices.");
+                Console.WriteLine($"Loaded {geometry.Faces.Count} faces.");
             }
+
+
         }
+        
+
+
+
+
 
 // Helper method to parse a load line
 private static IEnumerable<double> ParseLoadLine(string line, string vectorName, int lineNo)
