@@ -840,6 +840,7 @@ namespace InterlockingMasonryLocalForces
                         vectorG.AddRange(ParseLoadLine(trimmedLine, "VectorG", lineNo));
                         break;
                 }
+            }
                 // Validate VectorB and VectorG lengths
                 int expectedRows = geometry.Blocks.Count * 3;
                 ValidateVectorLength(vectorB, expectedRows, "VectorB");
@@ -848,11 +849,17 @@ namespace InterlockingMasonryLocalForces
                 data.B = vectorB.ToArray();
                 data.G = vectorG.ToArray();
 
+            // Output the final counts for verification
+            Console.WriteLine($"Loaded {geometry.Blocks.Count} blocks.");
+            Console.WriteLine($"Loaded {geometry.Vertices.Count} vertices.");
+            Console.WriteLine($"Loaded {geometry.Faces.Count} faces.");
+            Console.WriteLine($"Loaded {data.B.Length} entries for VectorB."); // Optional: verify vector lengths
+            Console.WriteLine($"Loaded {data.G.Length} entries for VectorG.");
 
-                // Cross-check: Number of faces should be equal to number of columns in the matrix divided by 4
-                // Each face has 2 vertices, and for each face-vertex pair, there are 2 variables (fN and fT)
-                // Total variables = number of face-vertex pairs * 2 = geometry.Faces.Count * 2 * 2
-                int expectedNumVariables = geometry.Faces.Count * 2 * 2;
+            // Cross-check: Number of faces should be equal to number of columns in the matrix divided by 4
+            // Each face has 2 vertices, and for each face-vertex pair, there are 2 variables (fN and fT)
+            // Total variables = number of face-vertex pairs * 2 = geometry.Faces.Count * 2 * 2
+            int expectedNumVariables = geometry.Faces.Count * 2 * 2;
 
                 // Assuming the matrix A will be built later and will have columns equal to the number of variables
                 //  placeholder for the actual number of variables
@@ -868,13 +875,7 @@ namespace InterlockingMasonryLocalForces
                 {
                     Console.WriteLine($"Warning: Number of faces ({geometry.Faces.Count}) does not equal number of vertices / 2 ({expectedNumFacesFromVertices}). Please verify your data.");
                 }
-
-                // Y output the counts for verification
-                Console.WriteLine($"Loaded {geometry.Blocks.Count} blocks.");
-                Console.WriteLine($"Loaded {geometry.Vertices.Count} vertices.");
-                Console.WriteLine($"Loaded {geometry.Faces.Count} faces.");
-            }
-
+          
 
         }
         
@@ -923,13 +924,23 @@ private static IEnumerable<double> ParseLoadLine(string line, string vectorName,
             Console.WriteLine($"AutoPopulateVertices: now have {geometry.Vertices.Count} vertices in the model.");
         }
 
-            static void DumpFaceData(GeometryModel g, string tag)
+        // --- DumpFaceData Method (No changes needed based on analysis) ---
+        static void DumpFaceData(GeometryModel g, string tag)
         {
             Console.WriteLine($"\n--- {tag} ---");
             foreach (var f in g.Faces.Values.OrderBy(f => f.Id))
             {
-                double mu = f.MuOverride ?? 0.4;
-                Console.WriteLine($"Face {f.Id}: L={f.Depth}  t={f.Thickness}  µ={mu}  c={f.CohesionValue}");
+                // Use Null Coalescing Operator: If f.MuOverride is null, use 0.4
+                double mu = f.MuOverride; // Assuming MuOverride is double, not double?
+                                          // If it IS double?, then use: double mu = f.MuOverride ?? 0.4;
+                                          // Based on parsing logic, it should always have a value now.
+                // Let's print the vectors too for debugging
+                string nxStr = f.Normal != null && f.Normal.Length == 2 ? f.Normal[0].ToString("F6") : "N/A";
+                string nyStr = f.Normal != null && f.Normal.Length == 2 ? f.Normal[1].ToString("F6") : "N/A";
+                string txStr = f.Tangent != null && f.Tangent.Length == 2 ? f.Tangent[0].ToString("F6") : "N/A";
+                string tyStr = f.Tangent != null && f.Tangent.Length == 2 ? f.Tangent[1].ToString("F6") : "N/A";
+
+                Console.WriteLine($"Face {f.Id}: L={f.Depth:F6}  t={f.Thickness:F6}  µ={mu:F6}  c={f.CohesionValue:F6} | N=({nxStr}, {nyStr}) T=({txStr}, {tyStr})");
             }
         }
 
