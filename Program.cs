@@ -61,9 +61,6 @@ namespace InterlockingMasonryLocalForces
 
         public static double[,] BuildEquilibriumMatrix(GeometryModel geometry, int numBlocks)
         {
-            // Before building the matrix, validate and ensure block centroids are symmetric
-            ValidateAndEnsureSymmetricCentroids(geometry);
-
             // Filter out only blocks with Id>0 in blockRowMap
             var nonSupportBlocks = geometry.Blocks.Values
             .Where(b => b.Id > 0)
@@ -155,43 +152,6 @@ namespace InterlockingMasonryLocalForces
             return _columnMap.TryGetValue((faceId, vertexId), out int idx) ? idx : -1;
         }
 
-        private static void ValidateAndEnsureSymmetricCentroids(GeometryModel geometry)
-        {
-            // Change axis of symmetry to 0.0
-            double axisOfSymmetryX = 0.0;
-
-            Console.WriteLine("Block Centroid Check:");
-            foreach (var block in geometry.Blocks.Values.OrderBy(b => b.Id))
-            {
-                Console.WriteLine($"Block {block.Id}: Centroid=({block.CentroidX:F6}, {block.CentroidY:F6})");
-            }
-
-            foreach (var block in geometry.Blocks.Values)
-            {
-                if (block.Id <= 0) continue; // Skip support blocks
-
-                // Find symmetric block ID (assuming 7 blocks total as in your example)
-                int symBlockId = 8 - block.Id; // Adjust formula based on your model
-
-                if (geometry.Blocks.TryGetValue(symBlockId, out Block symBlock))
-                {
-                    // Using x = 0.0 as axis of symmetry
-                    double expectedSymX = -block.CentroidX;
-
-                    if (Math.Abs(symBlock.CentroidX - expectedSymX) > 1e-6)
-                    {
-                        Console.WriteLine($"WARNING: Block {block.Id} and {symBlock.Id} centroids not symmetric!");
-                        Console.WriteLine($"Block {block.Id}: ({block.CentroidX:F6}, {block.CentroidY:F6})");
-                        Console.WriteLine($"Block {symBlock.Id}: ({symBlock.CentroidX:F6}, {symBlock.CentroidY:F6})");
-                        Console.WriteLine($"Expected symmetric X: {expectedSymX:F6}");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Symmetry verified for blocks {block.Id} and {symBlock.Id}");
-                    }
-                }
-            }
-        }
 
     }
 
@@ -339,9 +299,9 @@ namespace InterlockingMasonryLocalForces
 
                     // 8) Solve
                     model.Optimize();
-                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt");
+                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt", data);
                     // 9) Print solution
-                    PrintSolution(model, data);
+                    PrintSolution(model);
                     }
                 }
         }
@@ -749,7 +709,7 @@ namespace InterlockingMasonryLocalForces
         }
 
         ///  printing the solution
-        private void PrintSolution(GRBModel model, ProblemData data)
+        private void PrintSolution(GRBModel model)
         {
             int status = model.Status;
             if (model.SolCount > 0)
@@ -765,72 +725,6 @@ namespace InterlockingMasonryLocalForces
                 // faceVertexPairs[j/2] is the pair info
                 var pair = faceVertexPairs[j / 2];
                 Console.WriteLine($"Pair (face={pair.FaceId}, v={pair.VertexId}): fN={fn:F3}, fT={ft:F3}");
-                }
-
-
-
-
-
-                // Track total normal forces per face for eccentricity check
-                Dictionary<int, double> faceNormalTotals = new Dictionary<int, double>();
-
-                // First pass - collect vertex forces and check shear limits
-                Console.WriteLine("\n--- Vertex Forces and Shear Check ---");
-                for (int j = 0; j < fAll.Length; j += 2)
-                {
-                    double fn = fAll[j].X;
-                    double ft = fAll[j + 1].X;
-                    var pair = faceVertexPairs[j / 2];
-                    int faceId = pair.FaceId;
-                    int vId = pair.VertexId;
-
-                    // Get face data
-                    Face face = _geometry.Faces[faceId];
-                    double mu = face.MuOverride ?? data.Mu;
-                    double cohesion = face.CohesionValue;
-                    double area = face.Depth * face.Thickness;
-                    double cohesionShare = 0.5 * cohesion * area; // Half of cohesion for each vertex
-
-                    // Calculate excess shear
-                    double shearLimit = fn * mu + cohesionShare;
-                    double excessShear = Math.Abs(ft) - shearLimit;
-                    string shearStatus = excessShear > 1e-6 ? "EXCESS" : "OK";
-
-                    Console.WriteLine($"Pair (face={faceId}, v={vId}): fN={fn:F3}, fT={ft:F3} | " +
-                                      $"Shear limit={shearLimit:F3}, Excess={excessShear:F3} {shearStatus}");
-
-                    // Track total normal force per face
-                    if (!faceNormalTotals.ContainsKey(faceId))
-                        faceNormalTotals[faceId] = 0.0;
-
-                    faceNormalTotals[faceId] += fn;
-                }
-
-                // Second pass - check eccentricity limits
-                Console.WriteLine("\n--- Face Eccentricity Check ---");
-                foreach (var faceKvp in _geometry.Faces)
-                {
-                    int faceId = faceKvp.Key;
-                    Face face = faceKvp.Value;
-
-                    // Get the eccentricity value
-                    if (!faceEccVars.TryGetValue(faceId, out GRBVar eccVar))
-                        continue;
-
-                    double ecc = eccVar.X;
-                    double totalNormal = faceNormalTotals.GetValueOrDefault(faceId, 0.0);
-                    double depth = face.Depth;
-                    double thickness = face.Thickness;
-                    double sigmaC = data.SigmaC;
-
-                    // Calculate eccentricity limit
-                    double strengthLimit = depth / 2.0 - totalNormal / (2.0 * sigmaC * thickness);
-                    double excessEcc = Math.Abs(ecc) - Math.Abs(strengthLimit);
-                    string eccStatus = excessEcc > 1e-6 ? "EXCESS" : "OK";
-
-                    Console.WriteLine($"Face {faceId}: eccentricity = {ecc:F3} | " +
-                                      $"Total Normal = {totalNormal:F3}, Limit = ±{Math.Abs(strengthLimit):F3}, " +
-                                      $"Excess = {excessEcc:F3} {eccStatus}");
                 }
             }
             else
@@ -858,7 +752,7 @@ namespace InterlockingMasonryLocalForces
             }
         }
 
-        private void SaveResultsToFile(GRBModel model, string resultsFilePath)
+        private void SaveResultsToFile(GRBModel model, string resultsFilePath, ProblemData data)
         {
             // If no solution, do nothing
             if (model.SolCount == 0)
@@ -945,17 +839,120 @@ namespace InterlockingMasonryLocalForces
 
                     var current = faceTotalForces[pair.FaceId];
                     faceTotalForces[pair.FaceId] = (current.fnSum + fnVal, current.ftSum + ftVal);
-                }
-
-
-                
+                }    
                 // Write totals
                 foreach (var kvp in faceTotalForces)
                 {
                     writer.WriteLine($"Face {kvp.Key}: total_fn = {kvp.Value.fnSum:F3}, total_ft = {kvp.Value.ftSum:F3}");
                 }
 
-            }
+                // 5 SHEAR limits and eccentricity limits
+                // 3) Track total normal forces per face for eccentricity check
+                Dictionary<int, double> faceNormalTotals = new Dictionary<int, double>();
+
+                // 4) Vertex Forces and Shear Check
+                writer.WriteLine("\n--- Vertex Forces and Shear Check ---");
+                for (int j = 0; j < faceVertexPairs.Count; j++)
+                {
+                    int indexFn = 2 * j;
+                    int indexFt = 2 * j + 1;
+
+                    double fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
+                    double ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
+
+                    var pair = faceVertexPairs[j]; // (faceId, vertexId)
+                    int faceId = pair.FaceId;
+                    int vId = pair.VertexId;
+
+                    // Get face data
+                    Face face = _geometry.Faces[faceId];
+                    double mu = face.MuOverride ?? data.Mu;
+                    double cohesion = face.CohesionValue;
+                    double area = face.Depth * face.Thickness;
+                    double cohesionShare = 0.5 * cohesion * area; // Half of cohesion for each vertex
+
+                    // Calculate excess shear
+                    double shearLimit = fnVal * mu + cohesionShare;
+                    double excessShear = Math.Abs(ftVal) - shearLimit;
+                    string shearStatus;
+
+                    if (Math.Abs(excessShear) < 1e-6) // At failure level (approximately zero)
+                        shearStatus = "FAILURE";
+                    else if (excessShear > 0)
+                        shearStatus = "EXCESS";
+                    else
+                        shearStatus = "OK";
+
+                    writer.WriteLine($"Pair (face={faceId}, v={vId}): fN={fnVal:F3}, fT={ftVal:F3} | " +
+                                    $"Shear limit={shearLimit:F3}, Excess={excessShear:F3} {shearStatus}");
+
+                    // Track total normal force per face
+                    if (!faceNormalTotals.ContainsKey(faceId))
+                        faceNormalTotals[faceId] = 0.0;
+
+                    faceNormalTotals[faceId] += fnVal;
+                }
+
+                // 5) Face Eccentricity Check
+                writer.WriteLine("\n--- Face Eccentricity Check ---");
+                foreach (var kvp in faceEccVars)
+                {
+                    int faceId = kvp.Key;
+                    Face face = _geometry.Faces[faceId];
+                    GRBVar eccVar = kvp.Value;
+                    double eccVal = eccVar.X;
+
+                    double totalNormal = faceNormalTotals.GetValueOrDefault(faceId, 0.0);
+                    double depth = face.Depth;
+                    double thickness = face.Thickness;
+                    double sigmaC = data.SigmaC;
+
+                    // Calculate eccentricity limit
+                    double strengthLimit = depth / 2.0 - totalNormal / (2.0 * sigmaC * thickness);
+                    double excessEcc = Math.Abs(eccVal) - Math.Abs(strengthLimit);
+                    string eccStatus;
+
+                    if (Math.Abs(excessEcc) < 1e-6) // At failure level (approximately zero)
+                        eccStatus = "FAILURE";
+                    else if (excessEcc > 0)
+                        eccStatus = "EXCESS";
+                    else
+                        eccStatus = "OK";
+
+                    writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3} | " +
+                                    $"Total Normal = {totalNormal:F3}, Limit = ±{Math.Abs(strengthLimit):F3}, " +
+                                    $"Excess = {excessEcc:F3} {eccStatus}");
+                }
+
+                // 6) Compute and save total forces per face
+                writer.WriteLine();
+                writer.WriteLine("=== Face-level Total Forces ===");
+
+                for (int j = 0; j < faceVertexPairs.Count; j++)
+                {
+                    int indexFn = 2 * j;
+                    int indexFt = 2 * j + 1;
+
+                    double fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
+                    double ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
+
+                    var pair = faceVertexPairs[j]; // (faceId, vertexId)
+
+                    if (!faceTotalForces.ContainsKey(pair.FaceId))
+                        faceTotalForces[pair.FaceId] = (0.0, 0.0);
+
+                    var current = faceTotalForces[pair.FaceId];
+                    faceTotalForces[pair.FaceId] = (current.fnSum + fnVal, current.ftSum + ftVal);
+                }
+
+                // Write totals
+                foreach (var kvp in faceTotalForces)
+                {
+                    writer.WriteLine($"Face {kvp.Key}: total_fn = {kvp.Value.fnSum:F3}, total_ft = {kvp.Value.ftSum:F3}");
+                }
+  
+
+        }
 
             Console.WriteLine($"Results saved to {resultsFilePath}");
         }
