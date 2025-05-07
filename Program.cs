@@ -332,10 +332,14 @@ namespace InterlockingMasonryLocalForces
                     model.Parameters.NumericFocus = 3; // Maximum precision
                     model.Parameters.FeasibilityTol = 1e-9; // Tighter feasibility tolerance
                     model.Parameters.OptimalityTol = 1e-9; // Tighter optimality tolerance
+                    model.Parameters.MIPGap = 0.0005;
+                    model.Parameters.TimeLimit = 100; // Limit to 60 seconds
+                    //model.Parameters.Quad = 1;       // Convex quadratic relaxation
+                    // model.Parameters.PreQLinearize = 1; // Linearize quadratic terms
 
                     // 8) Solve
                     model.Optimize();
-                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_parallel.txt");
+                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt");
                     // 9) Print solution
                     PrintSolution(model, data);
                     }
@@ -593,7 +597,7 @@ namespace InterlockingMasonryLocalForces
 
         private void DumpColumnMap(ProblemData data)
         {
-            string path = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\mapping.txt";
+            string path = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\mapping_cairo.txt";
             using var w = new StreamWriter(path);
             // -----------------------------------------------------------
             // 1) Column mapping
@@ -973,7 +977,7 @@ namespace InterlockingMasonryLocalForces
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\data_parallel_friction_0e4.txt"
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\data_cairo_friction_0e4.txt"
                 , geometry, data);
                 // validate data
                 ValidateGeometryModel(geometry);
@@ -1066,20 +1070,25 @@ namespace InterlockingMasonryLocalForces
                     case "[Vertices]":
                         if (trimmedLine.StartsWith("VertexID")) continue;
                         var vertexParts = trimmedLine.Split(',');
-                        //int vId = int.Parse(vertexParts[0]);
+
                         if (!int.TryParse(vertexParts[0], out int vId))
                         {
-                            Console.WriteLine($"Line {lineNo}: Invalid BlockID '{vertexParts[0]}'. Skipping block.");
+                            Console.WriteLine($"Line {lineNo}: Invalid VertexID '{vertexParts[0]}'. Skipping vertex.");
                             continue;
                         }
-                        geometry.Vertices.Add(vId, new ContactPoint
+
+                        ContactPoint vertex = new ContactPoint
                         {
                             Id = vId,
                             X = double.Parse(vertexParts[1]),
                             Y = double.Parse(vertexParts[2])
-                        });
-                        break;
+                        };
 
+                        if (!geometry.Vertices.TryAdd(vId, vertex))
+                        {
+                            Console.WriteLine($"Line {lineNo}: Duplicate vertex ID {vId} found. Skipping.");
+                        }
+                        break;
 
                     case "[Faces]":
                         if (trimmedLine.StartsWith("FaceID")) continue;
