@@ -847,10 +847,10 @@ namespace InterlockingMasonryLocalForces
                 }
 
                 // 5 SHEAR limits and eccentricity limits
-                // 3) Track total normal forces per face for eccentricity check
+                // a) Track total normal forces per face for eccentricity check
                 Dictionary<int, double> faceNormalTotals = new Dictionary<int, double>();
 
-                // 4) Vertex Forces and Shear Check
+                // b) Vertex Forces and Shear Check
                 writer.WriteLine("\n--- Vertex Forces and Shear Check ---");
                 for (int j = 0; j < faceVertexPairs.Count; j++)
                 {
@@ -876,15 +876,14 @@ namespace InterlockingMasonryLocalForces
                     double excessShear = Math.Abs(ftVal) - shearLimit;
                     string shearStatus;
 
-                    if (Math.Abs(excessShear) < 1e-6) // At failure level (approximately zero)
+                    double tolerance = 1e-6;
+                    if (excessShear >= -tolerance && excessShear <= tolerance) // Zero or very close to zero (including -0.000)
                         shearStatus = "FAILURE";
-                    else if (excessShear > 0)
+                    else if (excessShear > tolerance)  // Clearly excessive
                         shearStatus = "EXCESS";
-                    else
+                    else // Safely negative (excessShear < -tolerance)
                         shearStatus = "OK";
-
-                    writer.WriteLine($"Pair (face={faceId}, v={vId}): fN={fnVal:F3}, fT={ftVal:F3} | " +
-                                    $"Shear limit={shearLimit:F3}, Excess={excessShear:F3} {shearStatus}");
+;
 
                     // Track total normal force per face
                     if (!faceNormalTotals.ContainsKey(faceId))
@@ -893,7 +892,7 @@ namespace InterlockingMasonryLocalForces
                     faceNormalTotals[faceId] += fnVal;
                 }
 
-                // 5) Face Eccentricity Check
+                // 6) Face Eccentricity Check
                 writer.WriteLine("\n--- Face Eccentricity Check ---");
                 foreach (var kvp in faceEccVars)
                 {
@@ -912,12 +911,14 @@ namespace InterlockingMasonryLocalForces
                     double excessEcc = Math.Abs(eccVal) - Math.Abs(strengthLimit);
                     string eccStatus;
 
-                    if (Math.Abs(excessEcc) < 1e-6) // At failure level (approximately zero)
+                    double tolerance = 1e-6;
+                    if (excessEcc >= -tolerance && excessEcc <= tolerance) // Zero or very close to zero (including -0.000)
                         eccStatus = "FAILURE";
-                    else if (excessEcc > 0)
+                    else if (excessEcc > tolerance)  // Clearly excessive
                         eccStatus = "EXCESS";
-                    else
+                    else // Safely negative (excessEcc < -tolerance)
                         eccStatus = "OK";
+
 
                     writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3} | " +
                                     $"Total Normal = {totalNormal:F3}, Limit = ±{Math.Abs(strengthLimit):F3}, " +
@@ -974,7 +975,7 @@ namespace InterlockingMasonryLocalForces
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\data_cairo_friction_0e4.txt"
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\data_cairo_friction_0e1.txt"
                 , geometry, data);
                 // validate data
                 ValidateGeometryModel(geometry);
