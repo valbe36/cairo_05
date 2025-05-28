@@ -278,8 +278,8 @@ namespace InterlockingMasonryLocalForces
                         // 5) Add friction & no-tension constraints
                         AddContactConstraints(model, geometry, data);
 
-                        // 6)   Add face eccentricity constraints 
-                         AddFaceEccConstraints(model, geometry, data);
+                    // 6)   Add face eccentricity constraints 
+                    AddFaceEccConstraintsAroundV1(model, geometry, data);
 
                         // 7) Objective: maximize lambda
                         GRBLinExpr obj = 0.0;
@@ -440,9 +440,109 @@ namespace InterlockingMasonryLocalForces
                 }
             }
         }
-        
 
-       
+
+        private void AddFaceEccConstraintsAroundV1(GRBModel model, GeometryModel geometry, ProblemData data)
+        {
+            double sigmaC = data.SigmaC;
+
+            Console.WriteLine("\n--- Face Eccentricity Constraints (Moment about v1) ---");
+
+            foreach (var fKvp in geometry.Faces)
+            {
+                Face face = fKvp.Value;
+                // We assume each face in 2D has exactly 2 vertices.
+                if (face.VertexIds.Count != 2) continue;
+
+                // Get vertex IDs
+                int vertexId1 = face.VertexIds[0];
+                int vertexId2 = face.VertexIds[1];
+
+                // Get vertex coordinates
+                ContactPoint vertex1 = _geometry.Vertices[vertexId1];
+                ContactPoint vertex2 = _geometry.Vertices[vertexId2];
+
+                // Get pair indices (for normal forces)
+                int idx1 = GetPairIndex(face.Id, vertexId1);
+                int idx2 = GetPairIndex(face.Id, vertexId2);
+
+                if (idx1 < 0 || idx2 < 0)
+                {
+                    Console.WriteLine($"Skipping ecc constraints for Face {face.Id}.");
+                    continue;
+                }
+
+                // Local normal vars at v1 & v2
+                GRBVar fn1 = fAll[2 * idx1];   // normal at (face, v1)
+                GRBVar fn2 = fAll[2 * idx2];   // normal at (face, v2)
+
+                // 1) fnk = fn1 + fn2
+                GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");
+                {
+                    GRBLinExpr sumExpr = new GRBLinExpr();
+                    sumExpr.AddTerm(1.0, fn1);
+                    sumExpr.AddTerm(1.0, fn2);
+                    model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
+                }
+
+                // 2) Distance from v1 to v2 (Lk). 
+                //    We'll just use the Euclidean distance so that Lk > 0.
+                //    If it's purely horizontal or vertical, this is still fine.
+                double dx = vertex2.X - vertex1.X;
+                double dy = vertex2.Y - vertex1.Y;
+                double Lk = Math.Sqrt(dx * dx + dy * dy);
+
+                // 3) Eccentricity from v1 (call it eK), bounding it from 0 to Lk 
+                //    if we want no tension at either edge. 
+                //    If you might allow partial tension, you could do a wider range: 
+                //    e.g. eK in [-0.5*Lk, 1.5*Lk], etc.
+                GRBVar eK = model.AddVar(0.0, Lk, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
+
+                faceEccVars[face.Id] = eK;  // (Optional) Keep a reference for debugging
+
+                // 4) "Moment about v1":  fnk * eK = fn2 * Lk
+                //    i.e. the total normal force times its lever arm about v1 
+                //    must match what fn2 * Lk alone would produce at v2.
+                {
+                    GRBQuadExpr mq = new GRBQuadExpr();
+                    //   +1 * (fnk * eK)
+                    mq.AddTerm(1.0, fnk, eK);
+                    //   - Lk * fn2
+                    mq.AddTerm(-Lk, fn2);
+
+                    model.AddQConstr(mq == 0.0, $"MomentEq_face{face.Id}");
+                }
+
+                // 5) If sigmaC > 0, add compressive/bending strength constraints.
+                double t_k = face.Thickness;
+                if (sigmaC > 1e-9 && t_k > 1e-9)
+                {
+                    // denom = 2 * sigmaC * thickness
+                    double denom = 2.0 * sigmaC * t_k;
+
+                    // (a)  eK + fnk / denom <= Lk
+                    {
+                        GRBLinExpr lhsUp = 0.0;
+                        lhsUp.AddTerm(1.0, eK);
+                        lhsUp.AddTerm(1.0 / denom, fnk);
+                        model.AddConstr(lhsUp <= Lk, $"StrengthUp_face{face.Id}");
+                    }
+
+                    // (b)  eK - fnk / denom >= 0
+                    {
+                        GRBLinExpr lhsLo = 0.0;
+                        lhsLo.AddTerm(1.0, eK);
+                        lhsLo.AddTerm(-1.0 / denom, fnk);
+                        model.AddConstr(lhsLo >= 0.0, $"StrengthLo_face{face.Id}");
+                    }
+                }
+            }
+        }
+
+
+
+
+       /*
         private void AddFaceEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             double sigmaC = data.SigmaC;
@@ -557,7 +657,7 @@ namespace InterlockingMasonryLocalForces
             }
         }
       
-
+        */
         private void DumpColumnMap(ProblemData data)
         {
             string path = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\mapping_cairo.txt";
