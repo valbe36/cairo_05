@@ -1238,74 +1238,98 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                     Console.WriteLine($"Face {face.Id} has {face.VertexIds.Count} vertices, expected 2.");
                     continue;
                 }
+                //  Make sure both blocks exist
+                if (!geometry.Blocks.ContainsKey(face.BlockJ) ||
+                    !geometry.Blocks.ContainsKey(face.BlockK))
+                {
+                    Console.WriteLine(
+                        $"Face {face.Id}: missing block J={face.BlockJ} or K={face.BlockK} in geometry!");
+                    continue;
+                }
+                // Step 1: pick which block is J or K by centroid comparison
+                //         i.e., geometry-based rule: smaller X => J, tie => smaller Y => J
 
+                // We'll store the original IDs in local variables
+                int jId = face.BlockJ;
+                int kId = face.BlockK;
+
+                // Retrieve the actual Block objects
+                var jRef = geometry.Blocks[jId];
+                var kRef = geometry.Blocks[kId];
+
+                // Decide if we need to swap them
+                bool needSwap = false;
+                const double eps = 1e-12;
+
+                // Compare centroidX
+                if (Math.Abs(jRef.CentroidX - kRef.CentroidX) < eps)
+                {
+                    // X are effectively the same, compare Y
+                    if (jRef.CentroidY > kRef.CentroidY)
+                        needSwap = true;
+                }
+                else
+                {
+                    // smaller X => J
+                    if (jRef.CentroidX > kRef.CentroidX)
+                        needSwap = true;
+                }
+                // If we decided to swap, swap face.BlockJ and face.BlockK
+                if (needSwap)
+                {
+                    face.BlockJ = kId;
+                    face.BlockK = jId;
+                }
+
+                // Now re-fetch references after potential swap
+                jRef = geometry.Blocks[face.BlockJ];
+                kRef = geometry.Blocks[face.BlockK];
+
+                // Step 2: retrieve the two vertices that define the face
                 int v1Id = face.VertexIds[0];
                 int v2Id = face.VertexIds[1];
 
-                if (!geometry.Vertices.ContainsKey(v1Id) || !geometry.Vertices.ContainsKey(v2Id))
+                if (!geometry.Vertices.ContainsKey(v1Id) ||
+                    !geometry.Vertices.ContainsKey(v2Id))
                 {
                     Console.WriteLine($"Face {face.Id}: missing one or both vertices in geometry!");
                     continue;
                 }
 
-                // 1) Get the two vertex coordinates
                 var v1 = geometry.Vertices[v1Id];
                 var v2 = geometry.Vertices[v2Id];
 
-                // 2) Compute the raw tangent from v1 to v2
+                // Step 3: compute the tangent from v1 -> v2
                 double dx = v2.X - v1.X;
                 double dy = v2.Y - v1.Y;
                 double length = Math.Sqrt(dx * dx + dy * dy);
+
                 if (length < 1e-12)
                 {
-                    Console.WriteLine($"Face {face.Id}: zero- length of ) edge. Skipping normal/tangent assignment.");
+                    Console.WriteLine($"Face {face.Id}: zero-length edge. Skipping normal/tangent assignment.");
                     continue;
                 }
-                face.Length = length;
+
+                face.Length = length; // store face length if needed
                 double tx = dx / length;
                 double ty = dy / length;
 
-                // 3) Define a candidate normal by rotating tangent +90° CCW
-                //    nCandidate = ( +ty, -tx ) or ( -ty, +tx ), whichever you prefer
+                // Step 4: candidate normal = +90° rotation of tangent
                 double nx = +ty;
                 double ny = -tx;
 
-                // 4) If we have valid block data for both J and K, flip normal if needed.
-                if (geometry.Blocks.ContainsKey(face.BlockJ)
-                    && geometry.Blocks.ContainsKey(face.BlockK))
+                // Step 5: flip normal if dot < 0 => ensure normal points from J->K
+                double dCx = (kRef.CentroidX - jRef.CentroidX);
+                double dCy = (kRef.CentroidY - jRef.CentroidY);
+
+                double dot = nx * dCx + ny * dCy;
+                if (dot < 0)
                 {
-                    var blockJ = geometry.Blocks[face.BlockJ];
-                    var blockK = geometry.Blocks[face.BlockK];
-
-                    double cJx = blockJ.CentroidX;
-                    double cJy = blockJ.CentroidY;
-                    double cKx = blockK.CentroidX;
-                    double cKy = blockK.CentroidY;
-
-                    // Vector from J -> K
-                    double dCx = cKx - cJx;
-                    double dCy = cKy - cJy;
-
-                    // Check dot product with nCandidate
-                    double dot = nx * dCx + ny * dCy;
-                    // If dot < 0, flip normal so that it points from J to K
-                    if (dot < 0)
-                    {
-                        nx = -nx;
-                        ny = -ny;
-                    }
-                }
-                else
-                {
-                    // Optional: you can log a warning if the block IDs
-                    // aren't found in geometry.Blocks
-                    Console.WriteLine(
-                        $"Warning: Face {face.Id} references block J={face.BlockJ}, K={face.BlockK}, " +
-                        $"but one or both are missing in geometry.Blocks. Skipping flip."
-                    );
+                    nx = -nx;
+                    ny = -ny;
                 }
 
-                // 5) Assign these final geometry-based vectors
+                // Step 6: assign final results
                 face.Tangent = new double[] { tx, ty };
                 face.Normal = new double[] { nx, ny };
             }
