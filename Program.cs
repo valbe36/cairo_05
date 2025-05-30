@@ -97,25 +97,16 @@ namespace InterlockingMasonryLocalForces
                 double[] n = face.Normal;
                 double[] t = face.Tangent;
 
-                // DEBUG: Print face information
-                Console.WriteLine($"\nFace {face.Id} between Blocks J={face.BlockJ} and K={face.BlockK}");
-                Console.WriteLine($"  Normal=({n[0]:F4}, {n[1]:F4}), Tangent=({t[0]:F4}, {t[1]:F4})");
-                // ADD THIS DEBUG OUTPUT HERE:
-                Console.WriteLine($"Matrix Building - Face {face.Id}: Normal=({n[0]:F6}, {n[1]:F6}), Tangent=({t[0]:F6}, {t[1]:F6})");
-                Console.WriteLine($"  Blocks J={face.BlockJ} (isSupport={isJSupport}), K={face.BlockK} (isSupport={isKSupport})");
-                // FIX: Order vertices consistently
                 foreach (int vId in face.VertexIds)
                 {
                     // locate the column for this face‐vertex
                     int colPairIndex = columnMap[(face.Id, vId)];
                     int colN = colPairIndex * 2;
                     int colT = colN + 1;
+
                     ContactPoint cp = geometry.Vertices[vId];
 
-                    // DEBUG: Print vertex information
-                    Console.WriteLine($"  Vertex {vId} at ({cp.X:F4}, {cp.Y:F4})");
-
-                    // If J is non‐support, add the "minus" contribution to blockJ
+                    // If J is non‐support, add the “minus” contribution to blockJ
                     if (!isJSupport && blockRowMap.TryGetValue(face.BlockJ, out int jRow))
                     {
                         // local coords of cp relative to blockJ centroid
@@ -123,44 +114,34 @@ namespace InterlockingMasonryLocalForces
                         double xRelJ = cp.X - bJ.CentroidX;
                         double yRelJ = cp.Y - bJ.CentroidY;
 
-                        // Calculate moment for debugging
-                        double momentJ = (xRelJ * n[1] - yRelJ * n[0]);
-                        Console.WriteLine($"    Block J: rel=({xRelJ:F4}, {yRelJ:F4}), moment coef={momentJ:F4}");
-
-                        // For block j
-                        matrixA[jRow + 0, colN] += (n[0]);
-                        matrixA[jRow + 1, colN] += (n[1]);
-                        matrixA[jRow + 0, colT] += (t[0]);
-                        matrixA[jRow + 1, colT] += (t[1]);
-
-                        // M - same formula, properly grouped for clarity
-                        matrixA[jRow + 2, colN] += (xRelJ * n[1] - yRelJ * n[0]);
-                        matrixA[jRow + 2, colT] += (xRelJ * t[1] - yRelJ * t[0]);
+                        // Fx
+                        matrixA[jRow, colN] -= n[0];
+                        matrixA[jRow, colT] -= t[0];
+                        // Fy
+                        matrixA[jRow + 1, colN] -= n[1];
+                        matrixA[jRow + 1, colT] -= t[1];
+                        // M
+                        matrixA[jRow + 2, colN] -= (xRelJ * n[1] - yRelJ * n[0]);
+                        matrixA[jRow + 2, colT] -= (xRelJ * t[1] - yRelJ * t[0]);
                     }
 
-                    // If K is non‐support, add the "plus" contribution to blockK
+                    // If K is non‐support, add the “plus” contribution to blockK
                     if (!isKSupport && blockRowMap.TryGetValue(face.BlockK, out int kRow))
                     {
                         var bK = geometry.Blocks[face.BlockK];
                         double xRelK = cp.X - bK.CentroidX;
                         double yRelK = cp.Y - bK.CentroidY;
 
-                        // Calculate moment for debugging
-                        double momentK = (xRelK * n[1] - yRelK * n[0]);
-                        Console.WriteLine($"    Block K: rel=({xRelK:F4}, {yRelK:F4}), moment coef={momentK:F4}");
-
-                        // For block k
-                        matrixA[kRow + 0, colN] += -n[0];
-                        matrixA[kRow + 1, colN] += -n[1];
-                        matrixA[kRow + 0, colT] += -t[0];
-                        matrixA[kRow + 1, colT] += -t[1];
-
-                        // M - same formula, properly grouped for clarity
-                        matrixA[kRow + 2, colN] += -(xRelK * n[1] - yRelK * n[0]);
-                        matrixA[kRow + 2, colT] += -(xRelK * t[1] - yRelK * t[0]);
+                        matrixA[kRow, colN] += + n[0];
+                        matrixA[kRow, colT] += +t[0];
+                        matrixA[kRow + 1, colN] += +n[1];
+                        matrixA[kRow + 1, colT] += + t[1];
+                        matrixA[kRow + 2, colN] += + (xRelK * n[1] - yRelK * n[0]);
+                        matrixA[kRow + 2, colT] += + (xRelK * t[1] - yRelK * t[0]);
                     }
                 }
             } // end foreach face
+
             return matrixA;
         }
 
@@ -168,6 +149,7 @@ namespace InterlockingMasonryLocalForces
         {
             return _columnMap.TryGetValue((faceId, vertexId), out int idx) ? idx : -1;
         }
+
 
 
     }
@@ -187,9 +169,9 @@ namespace InterlockingMasonryLocalForces
     public class Face
     {
         public int Id { get; set; }
-        public double Depth { get; set; }
-        public double Thickness { get; set; }
 
+        public double Thickness { get; set; }
+        public double Length { get; set; }
         public double CohesionValue { get; set; }
         public double? MuOverride { get; set; }
 
@@ -296,8 +278,8 @@ namespace InterlockingMasonryLocalForces
                         // 5) Add friction & no-tension constraints
                         AddContactConstraints(model, geometry, data);
 
-                        // 6)   Add face eccentricity constraints 
-                         AddFaceEccConstraints(model, geometry, data);
+                    // 6)   Add face eccentricity constraints 
+                    AddFaceEccConstraintsAroundV1(model, geometry, data);
 
                         // 7) Objective: maximize lambda
                         GRBLinExpr obj = 0.0;
@@ -391,148 +373,154 @@ namespace InterlockingMasonryLocalForces
                 }
             }
 
-
-        /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
-        /// plus no tension fN_j >= 0 (already in the variable bound).
+        // vertex based friction limit
+        /*
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
-            foreach (var fKvp in geometry.Faces)
+            foreach (var faceKvp in geometry.Faces)
             {
-                Face face = fKvp.Value;
-                // If you want friction on support interfaces, do NOT skip them
-                // But if you truly want to skip face contact if both sides are supports:
-                bool isJSupport = (face.BlockJ <= 0);
-                bool isKSupport = (face.BlockK <= 0);
-                // if (isJSupport && isKSupport) continue; 
-                // ^-- optional, depends if you want friction between two supports
+                Face face = faceKvp.Value;
+                double mu = face.MuOverride ?? data.Mu;
+                double c = face.CohesionValue;
+                // For a 2-vertex face, each vertex gets half of the total face cohesion:
+                double area = face.Thickness * face.Length;
+                double faceCohesion = c * area; // total face cohesion
+                double cPerVertex = faceCohesion / face.VertexIds.Count;  // e.g., 2.0 if face has 2 vertices
 
-                double mu = face.MuOverride ?? data.Mu;   // friction
-                double c = face.CohesionValue;            // cohesion
-                double area = face.Thickness * face.Depth;
-                double cA = c * area;                     // total cohesion capacity
-                                                          // If you prefer to split cohesion evenly among the corners (2 corners),
-                                                          // you can do something like:
-                                                          // double cShare = cA / face.VertexIds.Count;
-                                                          // but typically c=0 in your data.
-
-                // Loop over each local corner
                 foreach (int vId in face.VertexIds)
                 {
                     int idx = GetPairIndex(face.Id, vId);
-                    if (idx < 0)
-                        continue; // safety
+                    if (idx < 0) continue; // skip if not found
 
                     GRBVar fN = fAll[2 * idx];     // normal
                     GRBVar fT = fAll[2 * idx + 1]; // tangent
 
-                    // no‐tension
+                    // 1) No tension
                     model.AddConstr(fN >= 0.0, $"NoTension_face{face.Id}_v{vId}");
 
+                    // 2) Vertex friction (with partial cohesion)
                     if (mu <= 1e-12 && c <= 1e-12)
                     {
-                        // frictionless, no cohesion => no shear
+                        // frictionless => restrict tangential to zero
                         model.AddConstr(fT == 0.0, $"NoShear_face{face.Id}_v{vId}");
                     }
                     else
                     {
-                        // friction (± mu * fN) plus cohesion if c>0
-                        // e.g.  -mu·fN - cShare <= fT <= mu·fN + cShare
-                        // If c>0 but you want to apply all c to each corner, that is “double counting.”
-                        // So maybe you do cShare = cA / 2 for a 2-vertex face.
-
-                        // For now assume c=0 for your data.
-                        // Then we do: -mu fN <= fT <= mu fN
-                        // or if c>0:  -mu fN - cShare <= fT <= mu fN + cShare
-                        double cShare = 0.0; // If c=0, that’s easy
-                                             // if you wanted to share it: cShare = cA / face.VertexIds.Count;
-
-                        model.AddConstr(fT <= mu * fN + cShare,
-                                        $"FricPos_face{face.Id}_v{vId}");
-                        model.AddConstr(fT >= -mu * fN - cShare,
-                                        $"FricNeg_face{face.Id}_v{vId}");
+                        model.AddConstr(fT <= mu * fN + cPerVertex, $"FricPos_face{face.Id}_v{vId}");
+                        model.AddConstr(fT >= -mu * fN - cPerVertex, $"FricNeg_face{face.Id}_v{vId}");
                     }
                 }
             }
-        }
+        }*/
+
+        // face based friction limit
+            
+            /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
+            /// plus no tension fN_j >= 0 (already in the variable bound).
+            private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+            {
+                foreach (var fKvp in geometry.Faces)
+                {
+                    Face face = fKvp.Value;
+                    double mu = face.MuOverride ?? data.Mu;
+                    double c = face.CohesionValue;
+                    double area = face.Thickness * face.Length;
+                    double cohesionTerm = c * area;  // Full face cohesion
+
+                    // 1. First add no-tension constraints for each vertex
+                    foreach (int vId in face.VertexIds)
+                    {
+                        int idx = GetPairIndex(face.Id, vId);
+                        if (idx < 0) continue;
+
+                        GRBVar fN = fAll[2 * idx];
+                        model.AddConstr(fN >= 0.0, $"NoTension_face{face.Id}_v{vId}");
+                    }
+
+                    // 2. Create face-level sum variables for normal and tangential forces
+                    List<int> vertexIndices = new List<int>();
+                    foreach (int vId in face.VertexIds)
+                    {
+                        int idx = GetPairIndex(face.Id, vId);
+                        if (idx >= 0) vertexIndices.Add(idx);
+                    }
+
+                    if (vertexIndices.Count == 0) continue;
+
+                    // Create variables for total normal and tangential force on face
+                    GRBVar faceNormal = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"faceN_{face.Id}");
+                    GRBVar faceTangent = model.AddVar(-GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"faceT_{face.Id}");
+
+                    // Sum up all vertex normal forces
+                    GRBLinExpr normalSum = new GRBLinExpr();
+                    foreach (int idx in vertexIndices)
+                    {
+                        normalSum.AddTerm(1.0, fAll[2 * idx]);
+                    }
+                    model.AddConstr(faceNormal == normalSum, $"SumN_face{face.Id}");
+
+                    // Sum up all vertex tangential forces
+                    GRBLinExpr tangentSum = new GRBLinExpr();
+                    foreach (int idx in vertexIndices)
+                    {
+                        tangentSum.AddTerm(1.0, fAll[2 * idx + 1]);
+                    }
+                    model.AddConstr(faceTangent == tangentSum, $"SumT_face{face.Id}");
+
+                    // 3. Apply face-level friction-cohesion constraints
+                    if (mu <= 1e-12 && c <= 1e-12)
+                    {
+                        // Frictionless, no cohesion => no shear
+                        model.AddConstr(faceTangent == 0.0, $"NoShear_face{face.Id}");
+                    }
+                    else
+                    {
+                        // Face-level constraints with full cohesion
+                        model.AddConstr(faceTangent <= mu * faceNormal + cohesionTerm, $"FricPos_face{face.Id}");
+                        model.AddConstr(faceTangent >= -mu * faceNormal - cohesionTerm, $"FricNeg_face{face.Id}");
+                    }
+                }
+            }
+            
 
 
 
-
-        private void AddFaceEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+       
+        private void AddFaceEccConstraintsAroundV1(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             double sigmaC = data.SigmaC;
-            Console.WriteLine("\n--- Face Eccentricity Sign Determination ---");
 
-            // Inspect faceVertexPairs to understand its structure
-            Console.WriteLine("faceVertexPairs mapping:");
-            for (int i = 0; i < faceVertexPairs.Count; i++)
-            {
-                Console.WriteLine($"  Index {i}: Face {faceVertexPairs[i].FaceId}, Vertex {faceVertexPairs[i].VertexId}");
-            }
+            Console.WriteLine("\n--- Face Eccentricity Constraints (Moment about v1) ---");
 
-            // Process each face
             foreach (var fKvp in geometry.Faces)
             {
                 Face face = fKvp.Value;
+                // We assume each face in 2D has exactly 2 vertices.
                 if (face.VertexIds.Count != 2) continue;
 
+                // Get vertex IDs
                 int vertexId1 = face.VertexIds[0];
                 int vertexId2 = face.VertexIds[1];
 
-                // Find indices in faceVertexPairs list by linear search
-                int pairIndex1 = -1, pairIndex2 = -1;
-                for (int i = 0; i < faceVertexPairs.Count; i++)
-                {
-                    var pair = faceVertexPairs[i];
-                    if (pair.FaceId == face.Id && pair.VertexId == vertexId1)
-                        pairIndex1 = i;
-                    else if (pair.FaceId == face.Id && pair.VertexId == vertexId2)
-                        pairIndex2 = i;
-                }
+                // Get vertex coordinates
+                ContactPoint vertex1 = _geometry.Vertices[vertexId1];
+                ContactPoint vertex2 = _geometry.Vertices[vertexId2];
 
-                if (pairIndex1 < 0 || pairIndex2 < 0)
+                // Get pair indices (for normal forces)
+                int idx1 = GetPairIndex(face.Id, vertexId1);
+                int idx2 = GetPairIndex(face.Id, vertexId2);
+
+                if (idx1 < 0 || idx2 < 0)
                 {
-                    Console.WriteLine($"Could not find face-vertex pairs for Face {face.Id}. Skipping eccentricity constraint.");
+                    Console.WriteLine($"Skipping ecc constraints for Face {face.Id}.");
                     continue;
                 }
 
-                Console.WriteLine($"Face {face.Id} => vertex {vertexId1} at index {pairIndex1}, vertex {vertexId2} at index {pairIndex2}");
+                // Local normal vars at v1 & v2
+                GRBVar fn1 = fAll[2 * idx1];   // normal at (face, v1)
+                GRBVar fn2 = fAll[2 * idx2];   // normal at (face, v2)
 
-                // Get vertex coordinate points
-                ContactPoint v1 = geometry.Vertices[vertexId1];
-                ContactPoint v2 = geometry.Vertices[vertexId2];
-
-                // Face center
-                double faceCenterX = (v1.X + v2.X) / 2.0;
-                double faceCenterY = (v1.Y + v2.Y) / 2.0;
-
-                // Dot product sign to find which side each vertex is on relative to face.Tangent
-                double dx1 = v1.X - faceCenterX;
-                double dy1 = v1.Y - faceCenterY;
-                double dot1 = dx1 * face.Tangent[0] + dy1 * face.Tangent[1];
-
-                double dx2 = v2.X - faceCenterX;
-                double dy2 = v2.Y - faceCenterY;
-                double dot2 = dx2 * face.Tangent[0] + dy2 * face.Tangent[1];
-
-                // For safety, if face.Tangent is not strictly normalized, just take sign:
-                double sign1 = Math.Sign(dot1);
-                double sign2 = Math.Sign(dot2);
-
-                // Now define the moment arms:
-                double Lk = face.Depth;
-                double momentArm1 = sign1 * (Lk / 2.0);
-                double momentArm2 = sign2 * (Lk / 2.0);
-
-                // Debug print
-                Console.WriteLine($"Face {face.Id} => vertex1 = {vertexId1}, arm = {momentArm1:F3}");
-                Console.WriteLine($"Face {face.Id} => vertex2 = {vertexId2}, arm = {momentArm2:F3}");
-
-                // Access the corresponding normal force variables
-                GRBVar fn1 = fAll[2 * pairIndex1];
-                GRBVar fn2 = fAll[2 * pairIndex2];
-
-                // Define a new variable f_n,k = fn1 + fn2
+                // 1) fnk = fn1 + fn2
                 GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");
                 {
                     GRBLinExpr sumExpr = new GRBLinExpr();
@@ -541,43 +529,66 @@ namespace InterlockingMasonryLocalForces
                     model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
                 }
 
-                GRBVar eK = model.AddVar(-Lk / 2.0, Lk / 2.0, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
-                faceEccVars[face.Id] = eK;  // Save eccentricity variable for later use
+                // 2) Distance from v1 to v2 (Lk). 
+                //    We'll just use the Euclidean distance so that Lk > 0.
+                //    If it's purely horizontal or vertical, this is still fine.
+                double dx = vertex2.X - vertex1.X;
+                double dy = vertex2.Y - vertex1.Y;
+                double Lk = Math.Sqrt(dx * dx + dy * dy);
 
-                GRBQuadExpr mq = new GRBQuadExpr();
-                mq.AddTerm(1.0, fnk, eK);
-                mq.AddTerm(-momentArm1, fn1);  // Negated moment arms to match equation
-                mq.AddTerm(-momentArm2, fn2);  // fnk*eK = -(fn1*arm1 + fn2*arm2)
+                // 3) Eccentricity from v1 (call it eK), bounding it from 0 to Lk 
+                //    if we want no tension at either edge. 
+                //    If you might allow partial tension, you could do a wider range: 
+                //    e.g. eK in [-0.5*Lk, 1.5*Lk], etc.
+                GRBVar eK = model.AddVar(0.0, Lk, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
 
-                // Add the constraint
-                model.AddQConstr(mq == 0.0, $"MomentEq_face{face.Id}");
+                faceEccVars[face.Id] = eK;  // (Optional) Keep a reference for debugging
 
-                // Now add the strength limit constraints
-                //   if sigmaC > 0 and thickness > 0, Strength limit constraints
+                // 4) "Moment about v1":  fnk * eK = fn2 * Lk
+                //    i.e. the total normal force times its lever arm about v1 
+                //    must match what fn2 * Lk alone would produce at v2.
+                {
+                    GRBQuadExpr mq = new GRBQuadExpr();
+                    //   +1 * (fnk * eK)
+                    mq.AddTerm(1.0, fnk, eK);
+                    //   - Lk * fn2
+                    mq.AddTerm(-Lk, fn2);
+
+                    model.AddQConstr(mq == 0.0, $"MomentEq_face{face.Id}");
+                }
+
+                // 5) If sigmaC > 0, add compressive/bending strength constraints.
                 double t_k = face.Thickness;
                 if (sigmaC > 1e-9 && t_k > 1e-9)
                 {
+                    // denom = 2 * sigmaC * thickness
                     double denom = 2.0 * sigmaC * t_k;
 
-                    // eK + fnk/denom <= Lk/2
+                    // (a)  eK + fnk / denom <= Lk
                     {
                         GRBLinExpr lhsUp = 0.0;
                         lhsUp.AddTerm(1.0, eK);
                         lhsUp.AddTerm(1.0 / denom, fnk);
-                        model.AddConstr(lhsUp <= Lk / 2.0, $"StrengthUp_face{face.Id}");
+                        model.AddConstr(lhsUp <= Lk, $"StrengthUp_face{face.Id}");
                     }
 
-                    // eK - fnk/denom >= -Lk/2
+                    // (b)  eK - fnk / denom >= 0
                     {
                         GRBLinExpr lhsLo = 0.0;
                         lhsLo.AddTerm(1.0, eK);
                         lhsLo.AddTerm(-1.0 / denom, fnk);
-                        model.AddConstr(lhsLo >= -Lk / 2.0, $"StrengthLo_face{face.Id}");
+                        model.AddConstr(lhsLo >= 0.0, $"StrengthLo_face{face.Id}");
                     }
                 }
             }
         }
-      
+         
+
+
+
+
+
+
 
         private void DumpColumnMap(ProblemData data)
         {
@@ -776,7 +787,6 @@ namespace InterlockingMasonryLocalForces
             }
         }
 
-
         private void SaveResultsToFile(GRBModel model, string resultsFilePath, ProblemData data)
         {
             // If no solution, do nothing
@@ -829,20 +839,22 @@ namespace InterlockingMasonryLocalForces
                     writer.WriteLine($"Face {pair.FaceId}, Vertex {pair.VertexId}: " +
                                      $"fn={fnVal:F3}, ft={ftVal:F3}");
                 }
-
-                // 3) Face eccentricity values
-                writer.WriteLine("\n--- Face Eccentricity Values ---");
+                
+                
+                // 3) If we have face eccentricities, print them too
                 foreach (var kvp in faceEccVars)
                 {
                     int faceId = kvp.Key;
                     GRBVar eccVar = kvp.Value;
-                    double eccVal = eccVar.X;
+                    double eccVal = eccVar.X;  // or eccVar.Get(GRB.DoubleAttr.X)
                     writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3}");
                 }
 
-                // 4) Compute face-level total forces (only once)
+                // 4) Compute and save total forces per face
+                writer.WriteLine();
+                writer.WriteLine("=== Face-level Total Forces ===");
+
                 var faceTotalForces = new Dictionary<int, (double fnSum, double ftSum)>();
-                Dictionary<int, double> faceNormalTotals = new Dictionary<int, double>();
 
                 for (int j = 0; j < faceVertexPairs.Count; j++)
                 {
@@ -854,100 +866,140 @@ namespace InterlockingMasonryLocalForces
 
                     var pair = faceVertexPairs[j]; // (faceId, vertexId)
 
-                    // For force totals
                     if (!faceTotalForces.ContainsKey(pair.FaceId))
                         faceTotalForces[pair.FaceId] = (0.0, 0.0);
 
                     var current = faceTotalForces[pair.FaceId];
                     faceTotalForces[pair.FaceId] = (current.fnSum + fnVal, current.ftSum + ftVal);
-
-                    // Track normal forces for eccentricity check
-                    if (!faceNormalTotals.ContainsKey(pair.FaceId))
-                        faceNormalTotals[pair.FaceId] = 0.0;
-
-                    faceNormalTotals[pair.FaceId] += fnVal;
-                }
-
-                // Write force totals
-                writer.WriteLine("\n=== Face-level Total Forces ===");
+                }    
+                // Write totals
                 foreach (var kvp in faceTotalForces)
                 {
                     writer.WriteLine($"Face {kvp.Key}: total_fn = {kvp.Value.fnSum:F3}, total_ft = {kvp.Value.ftSum:F3}");
                 }
 
-                // 5) Vertex Forces and Shear Check
-                writer.WriteLine("\n--- Vertex Forces and Shear Check ---");
-                for (int j = 0; j < faceVertexPairs.Count; j++)
+
+                // 5) Shear limits at the FACE level (not vertex level)
+                writer.WriteLine("\n--- Face-level Shear Check ---");
+
+                foreach (var kvp in faceTotalForces)
                 {
-                    int indexFn = 2 * j;
-                    int indexFt = 2 * j + 1;
-
-                    double fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
-                    double ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
-
-                    var pair = faceVertexPairs[j]; // (faceId, vertexId)
-                    int faceId = pair.FaceId;
-                    int vId = pair.VertexId;
+                    int faceId = kvp.Key;
+                    double totalNormal = kvp.Value.fnSum;
+                    double totalShear = kvp.Value.ftSum;
 
                     // Get face data
                     Face face = _geometry.Faces[faceId];
                     double mu = face.MuOverride ?? data.Mu;
                     double cohesion = face.CohesionValue;
-                    double area = face.Depth * face.Thickness;
-                    double cohesionShare = 0.5 * cohesion * area; // Half of cohesion for each vertex
+                    double area = face.Length * face.Thickness;
+                    double shearLimit = mu * totalNormal + cohesion * area;
 
-                    // Calculate excess shear
-                    double shearLimit = fnVal * mu + cohesionShare;
-                    double excessShear = Math.Abs(ftVal) - shearLimit;
+                    // Shear "usage" ratio
+                    double tiny = 1e-9;  // small offset to avoid divide-by-zero
+                    double usageShear = Math.Abs(totalShear + tiny) / (shearLimit + tiny);
+
+                    // If usage is near 1.0, you're "on" the friction limit
                     string shearStatus;
-
-                    double tolerance = 1e-6;
-                    if (excessShear >= -tolerance && excessShear <= tolerance) // Zero or very close to zero (including -0.000)
-                        shearStatus = "FAILURE";
-                    else if (excessShear > tolerance)  // Clearly excessive
-                        shearStatus = "EXCESS";
-                    else // Safely negative (excessShear < -tolerance)
+                    double usageTolerance = 0.98;  // or pick something else like 0.99
+                    if (usageShear >= usageTolerance)
+                        shearStatus = "CRITICAL";
+                    else
                         shearStatus = "OK";
 
-                    // Write the shear check result
-                    writer.WriteLine($"Pair (face={faceId}, v={vId}): fN={fnVal:F3}, fT={ftVal:F3} | " +
-                                   $"Shear limit={shearLimit:F3}, Excess={excessShear:F3} {shearStatus}");
+                    writer.WriteLine($"Face {faceId} Shear: ratio={usageShear:F3}, status={shearStatus} " +
+$"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})"); 
                 }
 
-                // 6) Face Eccentricity Check
-                writer.WriteLine("\n--- Face Eccentricity Check ---");
+                // 6) Bending/Compression Usage Ratio
+                writer.WriteLine("\n--- Face Eccentricity Check (Bending/Compression) ---");
                 foreach (var kvp in faceEccVars)
                 {
                     int faceId = kvp.Key;
                     Face face = _geometry.Faces[faceId];
-                    GRBVar eccVar = kvp.Value;
-                    double eccVal = eccVar.X;
-
-                    double totalNormal = faceNormalTotals.GetValueOrDefault(faceId, 0.0);
-                    double depth = face.Depth;
+                    double eK = kvp.Value.X;  // or faceEccVars[faceId].X
+                    double totalNormal = faceTotalForces[faceId].fnSum;
+                    double length = face.Length;
                     double thickness = face.Thickness;
                     double sigmaC = data.SigmaC;
 
-                    // Calculate eccentricity limit
-                    double strengthLimit = depth / 2.0 - totalNormal / (2.0 * sigmaC * thickness);
-                    double excessEcc = Math.Abs(eccVal) - Math.Abs(strengthLimit);
-                    string eccStatus;
+                    // a) Determine compressed “width” in-plane
+                    //    eKeff = eK if eK < length/2, else (length - eK).
+                    double eKeff = (eK <= (length / 2.0))
+                        ? eK
+                        : (length - eK);
 
-                    double tolerance = 1e-6;
-                    if (excessEcc >= -tolerance && excessEcc <= tolerance) // Zero or very close to zero (including -0.000)
-                        eccStatus = "FAILURE";
-                    else if (excessEcc > tolerance)  // Clearly excessive
-                        eccStatus = "EXCESS";
-                    else // Safely negative (excessEcc < -tolerance)
-                        eccStatus = "OK";
+                    // b) The compressed cross-section area = t × 2 × eKeff
+                    //    (assuming eK is always in [0, length], so 2 eK or 2(length-eK))
+                    double areaPrime = 2.0 * thickness * eKeff;
 
-                    // Write the eccentricity check result
-                    writer.WriteLine($"Face {faceId}: eccentricity = {eccVal:F3} | " +
-                                   $"Total Normal = {totalNormal:F3}, Limit = ±{Math.Abs(strengthLimit):F3}, " +
-                                   $"Excess = {excessEcc:F3} {eccStatus}");
+                    // c) Compute the actual stress = (totalNormal / areaPrime),
+                    //    with some fallback if areaPrime ~ 0
+                    double tiny = 1e-9;
+                    double actualStress = 0.0;
+                    if (areaPrime > tiny)
+                    {
+                        actualStress = totalNormal / areaPrime;
+                    }
+                    else
+                    {
+                        // If eK=0 or eK=length=> areaPrime=0 => set stress=0 or skip
+                        // For example, if eK=0 => entire face is compressed at the vertex
+                        // or if eK=length => block is compressed at the other vertex.
+                        // It's your call how to handle physically.
+                        actualStress = 0.0;
+                    }
+
+                    // d) Bending/compression usage ratio
+                    //    usageBC = (actualStress / sigmaC), forced never to exceed 1.0 by constraints
+                    double usageBC = (actualStress + tiny) / (sigmaC + tiny);
+
+                    // Decide how close we are to the limit:
+                    double usageTolerance = 0.98;  // or 0.99, etc.
+                    string eccStatus = (usageBC >= usageTolerance) ? "CRITICAL" : "OK";
+
+                    // e) Write it out:
+                    writer.WriteLine($"Face {faceId}: eK={eK:F3}, eKeff={eKeff:F3}, totalN={totalNormal:F3}, " +
+                                     $"area'={areaPrime:F3}, actualStress={actualStress:F3}, usage={usageBC:F3}, status={eccStatus}");
                 }
-            }
 
+                //7 save used tangents and vectors
+                writer.WriteLine("\n--- Face Normal/Tangent Vectors ---");
+                foreach (var fEntry in _geometry.Faces)
+                {
+                    int faceId = fEntry.Key;
+                    Face face = fEntry.Value;
+                    double nx = face.Normal[0];
+                    double ny = face.Normal[1];
+                    double tx = face.Tangent[0];
+                    double ty = face.Tangent[1];
+                    // We'll store coordinates of "vertex 1" (the second vertex in face.VertexIds).
+                    // Default to (0,0) if something is missing.
+                    double coordX = 0.0;
+                    double coordY = 0.0;
+
+                    // If the face actually has 2 vertices, get vertex #1:
+                    if (face.VertexIds.Count == 2)
+                    {
+                        int vId0 = face.VertexIds[0];
+                        if (_geometry.Vertices.ContainsKey(vId0))
+                        {
+                            ContactPoint cp = _geometry.Vertices[vId0];
+                            coordX = cp.X;
+                            coordY = cp.Y;
+                        }
+                    }
+                    // Print everything
+                    writer.WriteLine(
+                        $"Face {faceId}: " +
+                        $"Vertex0=({coordX:F3}, {coordY:F3},0),  " +
+                        $"Normal=({nx:F3}, {ny:F3}),  " +
+                        $"Tangent=({tx:F3}, {ty:F3})"
+                    );
+                }
+
+
+            }
             Console.WriteLine($"Results saved to {resultsFilePath}");
         }
 
@@ -968,8 +1020,9 @@ namespace InterlockingMasonryLocalForces
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\test.txt" //data_pseudoparallel_friction_0e4
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_cairo_friction_0e4.txt"   //data_pseudoparallel_friction_0e4
                 , geometry, data);
+                ComputeFaceNormalsFromGeometry(geometry);
                 // validate data
                 ValidateGeometryModel(geometry);
 
@@ -1032,13 +1085,12 @@ namespace InterlockingMasonryLocalForces
                 lineNo++;
                 string trimmedLine = line.Trim();
                 if (string.IsNullOrEmpty(trimmedLine)) continue;
-
+                // Detect section headers,
                 if (trimmedLine.StartsWith("[") && trimmedLine.EndsWith("]"))
                 {
                     currentSection = trimmedLine;
                     continue;
                 }
-
                 switch (currentSection)
                 {
                     case "[Blocks]":
@@ -1092,10 +1144,10 @@ namespace InterlockingMasonryLocalForces
                             BlockJ = int.Parse(faceParts[1]),
                             BlockK = int.Parse(faceParts[2]),
                             VertexIds = new List<int> { int.Parse(faceParts[3]), int.Parse(faceParts[4]) },
-                            Depth = double.Parse(faceParts[9]),
-                            Thickness = double.Parse(faceParts[10]),
-                            CohesionValue = double.Parse(faceParts[11]),
-                            MuOverride = double.Parse(faceParts[12])
+                           
+                            Thickness = double.Parse(faceParts[5]),
+                            CohesionValue = double.Parse(faceParts[6]),
+                            MuOverride = double.Parse(faceParts[7])
                         };
 
                         // Check that referenced vertices exist
@@ -1128,61 +1180,7 @@ namespace InterlockingMasonryLocalForces
                             Console.WriteLine($"Line {lineNo}: Skipping face {face.Id} due to missing vertices");
                             continue;
                         }
-
-
-                        // Check if face.Depth matches actual distance between vertices
-                        double actualDistance = Math.Sqrt(
-                            Math.Pow(geometry.Vertices[face.VertexIds[1]].X - geometry.Vertices[face.VertexIds[0]].X, 2) +
-                            Math.Pow(geometry.Vertices[face.VertexIds[1]].Y - geometry.Vertices[face.VertexIds[0]].Y, 2)
-                        );
-                        if (Math.Abs(actualDistance - face.Depth) > 1e-6)
-                        {
-                            Console.WriteLine($"Line {lineNo}: Warning: Face {face.Id} depth ({face.Depth}) differs from actual vertex distance ({actualDistance})");
-                            Console.WriteLine($"Line {lineNo}: Auto-correcting face depth for Face {face.Id}");
-                            face.Depth = actualDistance;
-                        }
-                        if (Math.Abs(actualDistance - face.Depth) > 1e-6)
-                        {
-                            double originalDepth = face.Depth;
-                            face.Depth = actualDistance;
-                            LogDataModification(lineNo, $"Face {face.Id} depth corrected: {originalDepth:F6} → {actualDistance:F6}");
-                        }
-
-                        // Parse vectors
-                        double nx = double.Parse(faceParts[5]);
-                        double ny = double.Parse(faceParts[6]);
-                        double tx = double.Parse(faceParts[7]);
-                        double ty = double.Parse(faceParts[8]);
-
-                        // Check normal-tangent orthogonality
-                        double dotProduct = nx * tx + ny * ty;
-                        if (Math.Abs(dotProduct) > 1e-6)
-                        {
-                            Console.WriteLine($"Line {lineNo}: Warning: Face {face.Id} normal/tangent not orthogonal (dot product = {dotProduct})");
-                            Console.WriteLine($"Line {lineNo}: Auto-correcting tangent vector for Face {face.Id}");
-                            // Make tangent orthogonal to normal (rotate 90 degrees)
-                            tx = -ny;
-                            ty = nx;
-                            // Re-normalize tangent
-                            double tangentLength = Math.Sqrt(tx * tx + ty * ty);
-                            tx /= tangentLength;
-                            ty /= tangentLength;
-                        }
-                        // Ensure normal vector is normalized
-                        double normalLength = Math.Sqrt(nx * nx + ny * ny);
-                        if (Math.Abs(normalLength - 1.0) > 1e-6)
-                        {
-                            Console.WriteLine($"Line {lineNo}: Warning! Face {face.Id} normal not unit length ({normalLength:F6})");
-                            nx /= normalLength;
-                            ny /= normalLength;
-                            Console.WriteLine($"Line {lineNo}: Normalized normal vector for Face {face.Id}: ({nx:F6}, {ny:F6})");
-                        }
-
-                        // --- VALIDATION CHECKS ADDED HERE ---
-
-
-                        face.Normal = new double[] { nx, ny };
-                        face.Tangent = new double[] { tx, ty };
+    
                         geometry.Faces.Add(face.Id, face);
                         break;
 
@@ -1195,13 +1193,14 @@ namespace InterlockingMasonryLocalForces
                         break;
                 }
             }
-                // Validate VectorB and VectorG lengths
-                int expectedRows = geometry.Blocks.Count * 3;
-                ValidateVectorLength(vectorB, expectedRows, "VectorB");
-                ValidateVectorLength(vectorG, expectedRows, "VectorG");
+            // Validate VectorB and VectorG lengths
+            int realBlocksCount = geometry.Blocks.Values.Count(b => b.Id > 0);
+            int expectedRows = realBlocksCount * 3;
+            ValidateVectorLength(vectorB, expectedRows, "VectorB");
+            ValidateVectorLength(vectorG, expectedRows, "VectorG");
 
-                data.B = vectorB.ToArray();
-                data.G = vectorG.ToArray();
+            data.B = vectorB.ToArray();
+            data.G = vectorG.ToArray();
 
             // Output the final counts for verification
             Console.WriteLine($"Loaded {geometry.Blocks.Count} blocks.");
@@ -1210,39 +1209,110 @@ namespace InterlockingMasonryLocalForces
             Console.WriteLine($"Loaded {data.B.Length} entries for VectorB."); // Optional: verify vector lengths
             Console.WriteLine($"Loaded {data.G.Length} entries for VectorG.");
 
-            // Cross-check: Number of faces should be equal to number of columns in the matrix divided by 4
-            // Each face has 2 vertices, and for each face-vertex pair, there are 2 variables (fN and fT)
-            // Total variables = number of face-vertex pairs * 2 = geometry.Faces.Count * 2 * 2
-            // Cross-check: Count the expected number of variables
-            int totalFaceVertexPairs = 0;
+            // Cross-check expected #variables = #face-vertex pairs * 2
+            int totalFaceVertexPairs = geometry.Faces.Values.Sum(f => f.VertexIds.Count);
+            int expectedNumVariables = totalFaceVertexPairs * 2;
+            data.ExpectedNumVariables = expectedNumVariables;
+            Console.WriteLine($"Expected #variables = {expectedNumVariables} (from {totalFaceVertexPairs} face-vertex pairs)");
+
+            // Optional cross-check: does #faces match half the #vertices? (just a heuristic)
+            int expectedNumFacesFromVertices = geometry.Vertices.Count / 2;
+            if (geometry.Faces.Count != expectedNumFacesFromVertices)
+            {
+                Console.WriteLine($"Warning: #faces ({geometry.Faces.Count}) != #vertices/2 ({expectedNumFacesFromVertices}). Check data.");
+            }
+        }
+        private static double DistanceBetween(ContactPoint a, ContactPoint b)
+        {
+            return Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
+        }
+
+ 
+        public static void ComputeFaceNormalsFromGeometry(GeometryModel geometry)
+        {
             foreach (var face in geometry.Faces.Values)
             {
-                totalFaceVertexPairs += face.VertexIds.Count;
-            }
-            int expectedNumVariables = totalFaceVertexPairs * 2; // 2 variables (fN, fT) per vertex-face pair
-
-            // Store the expected count for later validation after matrix is built
-            data.ExpectedNumVariables = expectedNumVariables;
-
-            Console.WriteLine($"Expected number of variables: {expectedNumVariables} (from {totalFaceVertexPairs} face-vertex pairs)");
-
-            // Similarly,  cross-check the number of faces with the number of vertices / 2
-            int expectedNumFacesFromVertices = geometry.Vertices.Count / 2;
-                if (geometry.Faces.Count != expectedNumFacesFromVertices)
+                if (face.VertexIds.Count != 2)
                 {
-                    Console.WriteLine($"Warning: Number of faces ({geometry.Faces.Count}) does not equal number of vertices / 2 ({expectedNumFacesFromVertices}). Please verify your data.");
+                    // Skip or warn if not exactly 2 vertices
+                    Console.WriteLine($"Face {face.Id} has {face.VertexIds.Count} vertices, expected 2.");
+                    continue;
                 }
-          
 
+                int v1Id = face.VertexIds[0];
+                int v2Id = face.VertexIds[1];
+
+                if (!geometry.Vertices.ContainsKey(v1Id) || !geometry.Vertices.ContainsKey(v2Id))
+                {
+                    Console.WriteLine($"Face {face.Id}: missing one or both vertices in geometry!");
+                    continue;
+                }
+
+                // 1) Get the two vertex coordinates
+                var v1 = geometry.Vertices[v1Id];
+                var v2 = geometry.Vertices[v2Id];
+
+                // 2) Compute the raw tangent from v1 to v2
+                double dx = v2.X - v1.X;
+                double dy = v2.Y - v1.Y;
+                double length = Math.Sqrt(dx * dx + dy * dy);
+                if (length < 1e-12)
+                {
+                    Console.WriteLine($"Face {face.Id}: zero- length of ) edge. Skipping normal/tangent assignment.");
+                    continue;
+                }
+                face.Length = length;
+                double tx = dx / length;
+                double ty = dy / length;
+
+                // 3) Define a candidate normal by rotating tangent +90° CCW
+                //    nCandidate = ( +ty, -tx ) or ( -ty, +tx ), whichever you prefer
+                double nx = +ty;
+                double ny = -tx;
+
+                // 4) If we have valid block data for both J and K, flip normal if needed.
+                if (geometry.Blocks.ContainsKey(face.BlockJ)
+                    && geometry.Blocks.ContainsKey(face.BlockK))
+                {
+                    var blockJ = geometry.Blocks[face.BlockJ];
+                    var blockK = geometry.Blocks[face.BlockK];
+
+                    double cJx = blockJ.CentroidX;
+                    double cJy = blockJ.CentroidY;
+                    double cKx = blockK.CentroidX;
+                    double cKy = blockK.CentroidY;
+
+                    // Vector from J -> K
+                    double dCx = cKx - cJx;
+                    double dCy = cKy - cJy;
+
+                    // Check dot product with nCandidate
+                    double dot = nx * dCx + ny * dCy;
+                    // If dot < 0, flip normal so that it points from J to K
+                    if (dot < 0)
+                    {
+                        nx = -nx;
+                        ny = -ny;
+                    }
+                }
+                else
+                {
+                    // Optional: you can log a warning if the block IDs
+                    // aren't found in geometry.Blocks
+                    Console.WriteLine(
+                        $"Warning: Face {face.Id} references block J={face.BlockJ}, K={face.BlockK}, " +
+                        $"but one or both are missing in geometry.Blocks. Skipping flip."
+                    );
+                }
+
+                // 5) Assign these final geometry-based vectors
+                face.Tangent = new double[] { tx, ty };
+                face.Normal = new double[] { nx, ny };
+            }
         }
-        
 
-
-
-
-
-// Helper method to parse a load line
-private static IEnumerable<double> ParseLoadLine(string line, string vectorName, int lineNo)
+        // Helper method to parse a load line
+        private static IEnumerable<double> ParseLoadLine(string line, string vectorName, int lineNo)
         {
             try
             {
@@ -1376,6 +1446,7 @@ private static IEnumerable<double> ParseLoadLine(string line, string vectorName,
             Console.WriteLine("===============================\n");
         }
 
+        /*
         // Insert vertices if not already present
         static void AutoPopulateVertices(GeometryModel geometry)
         {
@@ -1391,6 +1462,9 @@ private static IEnumerable<double> ParseLoadLine(string line, string vectorName,
             }
             Console.WriteLine($"AutoPopulateVertices: now have {geometry.Vertices.Count} vertices in the model.");
         }
+        */
+        
+        
         // be informed if some input data is modified by the solver 
         static void LogDataModification(int lineNo, string message)
         {
@@ -1405,7 +1479,7 @@ private static IEnumerable<double> ParseLoadLine(string line, string vectorName,
         static void DumpFaceData(GeometryModel g, string tag)
         {
             Console.WriteLine($"\n--- {tag} Face Data ---");
-            Console.WriteLine("ID | BlockJ | BlockK | Length | Thickness | Cohesion | Friction | Normal | Tangent | Vertex Order Check");
+            Console.WriteLine("ID | BlockJ | BlockK | Thickness | Cohesion | Friction  | Vertex Order Check");
             Console.WriteLine("-----------------------------------------------------------------------------------------");
 
             foreach (var f in g.Faces.Values.OrderBy(f => f.Id))
@@ -1443,8 +1517,8 @@ private static IEnumerable<double> ParseLoadLine(string line, string vectorName,
                         vertexCheck += " ⚠️ REVERSED";
                 }
 
-                Console.WriteLine($"{f.Id,2} | {f.BlockJ,6} | {f.BlockK,6} | {f.Depth,6:F3} | {f.Thickness,9:F3} | " +
-                                  $"{f.CohesionValue,8:F3} | {muStr,8} | ({nxStr},{nyStr}) | ({txStr},{tyStr}) | {vertexCheck}");
+                Console.WriteLine($"{f.Id,2} | {f.BlockJ,6} | {f.BlockK,6} |  {f.Thickness,9:F3} | " +
+                                  $"{f.CohesionValue,8:F3} | {muStr,8} | {vertexCheck}");
             }
 
             // Check for orthogonality and unit length of vectors
