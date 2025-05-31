@@ -234,24 +234,25 @@ namespace InterlockingMasonryLocalForces
         /// The main solve routine
         public void SolveProblem(GeometryModel geometry, ProblemData data)
         {
-
-
-            // 1) Collect face-vertex pairs in a consistent order
+            // 1) Collect face-vertex pairs in EXACTLY THE SAME ORDER as matrix construction
             faceVertexPairs = new List<FaceVertexPair>();
-                foreach (var fkvp in geometry.Faces)
-                {
-                    int faceId = fkvp.Key;
-                    var face = fkvp.Value;
-                    foreach (int vId in face.VertexIds)
-                    {
-                        faceVertexPairs.Add(new FaceVertexPair(faceId, vId));
-                    }
-                }
 
-                // Sort them if desired by faceId, then vertexId
-                faceVertexPairs.Sort((a, b) => {
-                    return a.FaceId.CompareTo(b.FaceId);
-                });
+            // Use the SAME ordering as BuildEquilibriumMatrix
+            foreach (var face in geometry.Faces.Values.OrderBy(f => f.Id))  // ← SAME as matrix!
+            {
+                foreach (int vId in face.VertexIds)
+                {
+                    faceVertexPairs.Add(new FaceVertexPair(face.Id, vId));
+                }
+            }
+            pairIndexMap = new Dictionary<(int, int), int>(faceVertexPairs.Count);
+            for (int j = 0; j < faceVertexPairs.Count; j++)
+            {
+                var p = faceVertexPairs[j];
+                pairIndexMap[(p.FaceId, p.VertexId)] = j;
+            }
+
+            _geometry = geometry;
 
             pairIndexMap = new Dictionary<(int, int), int>(faceVertexPairs.Count);
                 for (int j = 0; j < faceVertexPairs.Count; j++)
@@ -275,36 +276,212 @@ namespace InterlockingMasonryLocalForces
                         // 4) Add equilibrium constraints:
                         AddEquilibriumConstraints(model, data);
 
-                        // 5) Add friction & no-tension constraints
-                        AddContactConstraints(model, geometry, data);
+                    // *** ADD THIS LINE FOR VERIFICATION ***
+                    VerifyMatrixVariableCorrespondence(geometry, data);
+
+                    model.VerifyEquilibrium(data, faceVertexPairs, fAll, lambda, geometry);
+
+                    // 5) Add friction & no-tension constraints
+                    AddContactConstraints(model, geometry, data);
 
                     // 6)   Add face eccentricity constraints 
-                    AddFaceEccConstraintsAroundV1(model, geometry, data);
+                    //  AddFaceEccConstraintsAroundV1(model, geometry, data);
+                    AddHybridEccConstraints(model, geometry, data);
 
-                        // 7) Objective: maximize lambda
-                        GRBLinExpr obj = 0.0;
+                    // 7) Objective: maximize lambda
+                    GRBLinExpr obj = 0.0;
                         obj.AddTerm(1.0, lambda);
                         model.SetObjective(obj, GRB.MAXIMIZE);
                         model.Write("debugModel.lp");
-                        DumpColumnMap(data);
+                        
 
-                    model.Parameters.NumericFocus = 3; // Maximum precision
-                    model.Parameters.FeasibilityTol = 1e-9; // Tighter feasibility tolerance
-                    model.Parameters.OptimalityTol = 1e-9; // Tighter optimality tolerance
-                    model.Parameters.MIPGap = 0.0005;
-                    model.Parameters.TimeLimit = 100; // Limit to 60 seconds
+                    model.Parameters.NumericFocus = 3;      // Maximum precision
+                    model.Parameters.FeasibilityTol = 1e-6;  // Less aggressive; 1e-9 Tighter
+                    model.Parameters.OptimalityTol = 1e-6;   // Less aggressive; 1e-9 Tighter
+                    model.Parameters.BarConvTol = 1e-8;      // Barrier convergence
+                    model.Parameters.MarkowitzTol = 0.01;    // Numerical stability
+                    model.Parameters.ScaleFlag = 2;          // Automatic scaling
+                    model.Parameters.Aggregate = 0;          // Disable presolve aggregation
+                    model.Parameters.PreCrush = 1;           // Enable constraint matrix reduction
+                    model.Parameters.Quad = 1;               // Use quadratic algorithm if applicable
+
+                    // For debugging - disable some presolve steps
+                    model.Parameters.Presolve = 1;           // Enable but conservative
+             
+
+
+                    // model.Parameters.MIPGap = 0.0005;
+                   // model.Parameters.TimeLimit = 100; // Limit to 60 seconds
                     //model.Parameters.Quad = 1;       // Convex quadratic relaxation
                     // model.Parameters.PreQLinearize = 1; // Linearize quadratic terms
 
                     // 8) Solve
                     model.Optimize();
-                        SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt", data);
-                    // 9) Print solution
+
+                    //9 checks
+                    if (model.Status == GRB.Status.OPTIMAL)
+                    {
+                        VerifyPostSolution(model, data, data.Mu);
+                    }
+
+
+                    SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt", data);
+                    // 10) Print solution
                     PrintSolution(model);
                     }
                 }
         }
 
+        // CRITICAL FIX 2: Add Debugging Method to Verify Matrix-Variable Correspondence
+        private void VerifyMatrixVariableCorrespondence(GeometryModel geometry, ProblemData data)
+        {
+            Console.WriteLine("\n=== MATRIX-VARIABLE CORRESPONDENCE CHECK ===");
+
+            // Build the same column map as in BuildEquilibriumMatrix
+            Dictionary<(int FaceId, int VertexId), int> matrixColumnMap = new Dictionary<(int, int), int>();
+            int matrixColIdx = 0;
+            foreach (var face in geometry.Faces.Values.OrderBy(f => f.Id))
+            {
+                foreach (int vId in face.VertexIds)
+                {
+                    matrixColumnMap[(face.Id, vId)] = matrixColIdx++;
+                }
+            }
+
+            // Compare with your variable ordering
+            bool orderingMatch = true;
+            for (int j = 0; j < faceVertexPairs.Count; j++)
+            {
+                var pair = faceVertexPairs[j];
+                int expectedMatrixCol = matrixColumnMap[(pair.FaceId, pair.VertexId)];
+
+                if (expectedMatrixCol != j)
+                {
+                    Console.WriteLine($"MISMATCH: Variable pair {j} (Face {pair.FaceId}, Vertex {pair.VertexId}) " +
+                                    $"corresponds to matrix column {expectedMatrixCol}");
+                    orderingMatch = false;
+                }
+            }
+
+            if (orderingMatch)
+            {
+                Console.WriteLine("✓ Matrix columns and variables are correctly aligned");
+            }
+            else
+            {
+                Console.WriteLine("✗ CRITICAL ERROR: Matrix-variable ordering mismatch!");
+                Console.WriteLine("This will cause incorrect solutions that worsen with friction.");
+            }
+        }
+
+        // CRITICAL FIX 3: Enhanced Post-Solution Verification
+        // CRITICAL FIX 3: Enhanced Post-Solution Verification
+        private void VerifyPostSolution(GRBModel model, ProblemData data, double friction)
+        {
+            if (model.Status != GRB.Status.OPTIMAL) return;
+
+            Console.WriteLine($"\n=== POST-SOLUTION VERIFICATION (μ = {friction}) ===");
+
+            double lambdaVal = lambda.X;
+            Console.WriteLine($"Lambda = {lambdaVal:F6}");
+
+            // Manual equilibrium check for first block
+            if (faceVertexPairs.Count > 0)
+            {
+                Console.WriteLine("\nManual equilibrium check for Block 1:");
+
+                double sumFx = 0, sumFy = 0, sumM = 0;
+                var block1 = _geometry.Blocks[1];
+
+                // Check all forces affecting block 1
+                for (int j = 0; j < faceVertexPairs.Count; j++)
+                {
+                    var pair = faceVertexPairs[j];
+                    var face = _geometry.Faces[pair.FaceId];
+
+                    // Only consider faces that touch block 1
+                    if (face.BlockJ != 1 && face.BlockK != 1) continue;
+
+                    double fn = fAll[2 * j].X;     // Normal force
+                    double ft = fAll[2 * j + 1].X; // Tangential force
+
+                    // Determine sign based on whether block 1 is J or K
+                    double sign = (face.BlockJ == 1) ? -1.0 : +1.0;
+
+                    // Force contributions
+                    sumFx += sign * (fn * face.Normal[0] + ft * face.Tangent[0]);
+                    sumFy += sign * (fn * face.Normal[1] + ft * face.Tangent[1]);
+
+                    // Moment contributions
+                    var vertex = _geometry.Vertices[pair.VertexId];
+                    double xRel = vertex.X - block1.CentroidX;
+                    double yRel = vertex.Y - block1.CentroidY;
+                    double momentArm = xRel * face.Normal[1] - yRel * face.Normal[0];
+                    sumM += sign * fn * momentArm;
+
+                    momentArm = xRel * face.Tangent[1] - yRel * face.Tangent[0];
+                    sumM += sign * ft * momentArm;
+                }
+
+                // Add external loads
+                if (data.B != null && data.B.Length > 2)
+                {
+                    sumFx += data.B[0] * lambdaVal;
+                    sumFy += data.B[1] * lambdaVal;
+                    sumM += data.B[2] * lambdaVal;
+                }
+
+                // Add gravity
+                if (data.G != null && data.G.Length > 2)
+                {
+                    sumFx += data.G[0];
+                    sumFy += data.G[1];
+                    sumM += data.G[2];
+                }
+
+                Console.WriteLine($"  Manual ΣFx = {sumFx:F6} (should ≈ 0)");
+                Console.WriteLine($"  Manual ΣFy = {sumFy:F6} (should ≈ 0)");
+                Console.WriteLine($"  Manual ΣM = {sumM:F6} (should ≈ 0)");
+
+                if (Math.Abs(sumFx) > 1e-3 || Math.Abs(sumFy) > 1e-3 || Math.Abs(sumM) > 1e-3)
+                {
+                    Console.WriteLine("  ⚠️  EQUILIBRIUM VIOLATION DETECTED!");
+                }
+            }
+            // Check friction constraint violations manually
+            Console.WriteLine("\nManual friction constraint check:");
+            foreach (var faceKvp in _geometry.Faces)
+            {
+                var face = faceKvp.Value;
+                double mu = face.MuOverride ?? friction;
+                double cohesion = face.CohesionValue;
+                double area = face.Length * face.Thickness;
+
+                // Sum forces on this face
+                double totalNormal = 0, totalTangential = 0;
+                foreach (int vId in face.VertexIds)
+                {
+                    int idx = GetPairIndex(face.Id, vId);
+                    if (idx >= 0)
+                    {
+                        totalNormal += fAll[2 * idx].X;
+                        totalTangential += fAll[2 * idx + 1].X;
+                    }
+                }
+
+                double frictionLimit = mu * totalNormal + cohesion * area;
+                double frictionUsage = Math.Abs(totalTangential) / (frictionLimit + 1e-12);
+
+                Console.WriteLine($"  Face {face.Id}: |T|={Math.Abs(totalTangential):F3}, limit={frictionLimit:F3}, usage={frictionUsage:F3}");
+
+                if (frictionUsage > 1.01) // Allow small tolerance
+                {
+                    Console.WriteLine($"    ⚠️  FRICTION VIOLATION: {frictionUsage:F3} > 1.0");
+                }
+            }
+        }
+
+       
 
         /// Create 2 local variables (f_n, f_t) for each face-vertex pair,
         /// plus the load factor lambda.
@@ -373,6 +550,9 @@ namespace InterlockingMasonryLocalForces
                 }
             }
 
+
+
+
         // vertex based friction limit
         /*
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
@@ -414,10 +594,10 @@ namespace InterlockingMasonryLocalForces
         }*/
 
         // face based friction limit
-            
-            /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
-            /// plus no tension fN_j >= 0 (already in the variable bound).
-            private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+
+        /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
+        /// plus no tension fN_j >= 0 (already in the variable bound).
+        private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
             {
                 foreach (var fKvp in geometry.Faces)
                 {
@@ -481,10 +661,7 @@ namespace InterlockingMasonryLocalForces
                     }
                 }
             }
-            
-
-
-
+          
        
         private void AddFaceEccConstraintsAroundV1(GRBModel model, GeometryModel geometry, ProblemData data)
         {
@@ -582,165 +759,85 @@ namespace InterlockingMasonryLocalForces
                 }
             }
         }
-         
 
-
-
-
-
-
-
-        private void DumpColumnMap(ProblemData data)
+        /// <summary>
+        /// Simple fix: Add exact moment equilibrium as quadratic constraint
+        /// Keep McCormick for initialization, add exact constraint for accuracy
+        /// </summary>
+        private void AddHybridEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
-            string path = @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\mapping_cairo.txt";
-            using var w = new StreamWriter(path);
-            // -----------------------------------------------------------
-            // 1) Column mapping
-            // -----------------------------------------------------------
-            w.WriteLine("=== COLUMN MAPPING ===");
-            w.WriteLine("Column | Face-Id, Vertex-Id | Variable");
-            w.WriteLine("-------------------------");
-            for (int j = 0; j < faceVertexPairs.Count; j++)
+            double sigmaC = data.SigmaC;
+
+            Console.WriteLine("\n--- Hybrid Linearized + Exact Eccentricity Constraints ---");
+
+            foreach (var fKvp in geometry.Faces)
             {
-                var p = faceVertexPairs[j];
-                int faceId = p.FaceId;
-                int vertexId = p.VertexId;
+                Face face = fKvp.Value;
+                if (face.VertexIds.Count != 2) continue;
 
-                // Two columns per pair: Normal, Tangential
-                int colN = 2 * j;
-                int colT = colN + 1;
+                int vertexId1 = face.VertexIds[0];
+                int vertexId2 = face.VertexIds[1];
 
-                w.WriteLine($"{colN,5} | F{faceId}, V{vertexId} | Normal");
-                w.WriteLine($"{colT,5} | F{faceId}, V{vertexId} | Tangential");
-                w.WriteLine("-------------------------");
-            }
+                ContactPoint vertex1 = _geometry.Vertices[vertexId1];
+                ContactPoint vertex2 = _geometry.Vertices[vertexId2];
 
-            // -----------------------------------------------------------
-            // 2) Print the full A-matrix
-            // -----------------------------------------------------------
-            w.WriteLine("\n=== FULL A-MATRIX ===");
-            if (data.MatrixA != null)
-            {
-                int nR = data.NumRows;
-                int nC = data.NumCols;
-                w.WriteLine($"Matrix dimensions: {nR} x {nC}");
-                for (int i = 0; i < nR; i++)
+                int idx1 = GetPairIndex(face.Id, vertexId1);
+                int idx2 = GetPairIndex(face.Id, vertexId2);
+
+                if (idx1 < 0 || idx2 < 0) continue;
+
+                GRBVar fn1 = fAll[2 * idx1];
+                GRBVar fn2 = fAll[2 * idx2];
+
+                // Calculate face length
+                double dx = vertex2.X - vertex1.X;
+                double dy = vertex2.Y - vertex1.Y;
+                double Lk = Math.Sqrt(dx * dx + dy * dy);
+
+                // 1) Total normal force
+                GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");
                 {
-                    w.Write($"Row {i,2}: ");
-                    for (int j = 0; j < nC; j++)
+                    GRBLinExpr sumExpr = new GRBLinExpr();
+                    sumExpr.AddTerm(1.0, fn1);
+                    sumExpr.AddTerm(1.0, fn2);
+                    model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
+                }
+
+                // 2) Eccentricity variable
+                GRBVar eK = model.AddVar(0.0, Lk, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
+                faceEccVars[face.Id] = eK;
+
+                // 3) EXACT MOMENT EQUILIBRIUM (quadratic but exact)
+                {
+                    GRBQuadExpr mq = new GRBQuadExpr();
+                    mq.AddTerm(1.0, fnk, eK);  // +1 * (fnk * eK)
+                    mq.AddTerm(-Lk, fn2);      // -Lk * fn2
+                    model.AddQConstr(mq == 0.0, $"ExactMomentEq_face{face.Id}");
+                }
+
+                // 4) EXACT STRESS BLOCK CONSTRAINTS (your original - these were correct!)
+                double t_k = face.Thickness;
+                if (sigmaC > 1e-9 && t_k > 1e-9)
+                {
+                    double denom = 2.0 * sigmaC * t_k;
+
                     {
-                        w.Write($"{data.MatrixA[i, j],10:F4} ");
+                        GRBLinExpr lhsUp = new GRBLinExpr();
+                        lhsUp.AddTerm(1.0, eK);
+                        lhsUp.AddTerm(1.0 / denom, fnk);
+                        model.AddConstr(lhsUp <= Lk, $"StrengthUp_face{face.Id}");
                     }
-                    w.WriteLine();
-                }
-            }
-            else
-            {
-                w.WriteLine("No MatrixA defined.");
-            }
 
-            // -----------------------------------------------------------
-            // 3) Print the full B vector
-            // -----------------------------------------------------------
-            w.WriteLine("\n=== VECTOR B ===");
-            if (data.B != null && data.B.Length > 0)
-            {
-                for (int i = 0; i < data.B.Length; i++)
-                {
-                    w.WriteLine($"B[{i}] = {data.B[i]:F6}");
-                }
-            }
-            else
-            {
-                w.WriteLine("No B vector defined or empty.");
-            }
-
-            // -----------------------------------------------------------
-            // 4) Print the full G vector
-            // -----------------------------------------------------------
-            w.WriteLine("\n=== VECTOR G ===");
-            if (data.G != null && data.G.Length > 0)
-            {
-                for (int i = 0; i < data.G.Length; i++)
-                {
-                    w.WriteLine($"G[{i}] = {data.G[i]:F6}");
-                }
-            }
-            else
-            {
-                w.WriteLine("No G vector defined or empty.");
-            }
-
-            // -----------------------------------------------------------
-            // 5) Print block centroid + corner vertices
-            // -----------------------------------------------------------
-            w.WriteLine("\n=== BLOCK CORNERS & CENTROIDS ===");
-
-            // Build a map: blockId -> set of vertexIds
-            var blockCorners = new Dictionary<int, HashSet<int>>();
-            // Initialize sets so every block has an entry, even if empty
-            foreach (var blk in _geometry.Blocks.Values)
-            {
-                blockCorners[blk.Id] = new HashSet<int>();
-            }
-
-            // Populate sets: scan each face
-            foreach (var face in _geometry.Faces.Values)
-            {
-                // For blockJ
-                if (_geometry.Blocks.ContainsKey(face.BlockJ))
-                {
-                    // Add all face vertices to that block's set
-                    foreach (int vid in face.VertexIds)
                     {
-                        blockCorners[face.BlockJ].Add(vid);
+                        GRBLinExpr lhsLo = new GRBLinExpr();
+                        lhsLo.AddTerm(1.0, eK);
+                        lhsLo.AddTerm(-1.0 / denom, fnk);
+                        model.AddConstr(lhsLo >= 0.0, $"StrengthLo_face{face.Id}");
                     }
                 }
-                // For blockK
-                if (_geometry.Blocks.ContainsKey(face.BlockK))
-                {
-                    foreach (int vid in face.VertexIds)
-                    {
-                        blockCorners[face.BlockK].Add(vid);
-                    }
-                }
+
+                Console.WriteLine($"Face {face.Id}: Added EXACT quadratic moment equilibrium");
             }
-
-            // Now print the corners for each block
-            foreach (var blk in _geometry.Blocks.Values.OrderBy(b => b.Id))
-            {
-                double cx = blk.CentroidX;
-                double cy = blk.CentroidY;
-                w.WriteLine($"\nBlock ID={blk.Id}, Centroid=({cx:F3}, {cy:F3})");
-
-                // Retrieve all vertex IDs for this block
-                var cornerIds = blockCorners[blk.Id].OrderBy(id => id).ToList();
-                if (cornerIds.Count == 0)
-                {
-                    w.WriteLine("  No corners found (maybe it's a support with no faces?).");
-                    continue;
-                }
-
-                w.WriteLine("  Corner Vertices:");
-                foreach (int vid in cornerIds)
-                {
-                    if (_geometry.Vertices.TryGetValue(vid, out var cpt))
-                    {
-                        w.WriteLine($"   - vId={vid}, coords=({cpt.X:F3}, {cpt.Y:F3})");
-                    }
-                    else
-                    {
-                        w.WriteLine($"   - vId={vid}, (Not found in geometry.Vertices)");
-                    }
-                }
-            }
-
-            w.WriteLine("\n=== End of matrix structure analysis ===");
-            w.Flush();
-
-            Console.WriteLine($"Matrix, B/G, block corners, and centroids dumped to {path}");
-
-
         }
 
         ///  printing the solution
@@ -773,7 +870,9 @@ namespace InterlockingMasonryLocalForces
             model.Parameters.Presolve = 0;
             model.Optimize();
 
-            if (model.Status == 3)
+
+
+                if (model.Status == 3)
               {
             Console.WriteLine("Model is infeasible. Computing IIS...");
             model.ComputeIIS();
@@ -839,8 +938,8 @@ namespace InterlockingMasonryLocalForces
                     writer.WriteLine($"Face {pair.FaceId}, Vertex {pair.VertexId}: " +
                                      $"fn={fnVal:F3}, ft={ftVal:F3}");
                 }
-                
-                
+
+
                 // 3) If we have face eccentricities, print them too
                 foreach (var kvp in faceEccVars)
                 {
@@ -871,7 +970,7 @@ namespace InterlockingMasonryLocalForces
 
                     var current = faceTotalForces[pair.FaceId];
                     faceTotalForces[pair.FaceId] = (current.fnSum + fnVal, current.ftSum + ftVal);
-                }    
+                }
                 // Write totals
                 foreach (var kvp in faceTotalForces)
                 {
@@ -908,7 +1007,7 @@ namespace InterlockingMasonryLocalForces
                         shearStatus = "OK";
 
                     writer.WriteLine($"Face {faceId} Shear: ratio={usageShear:F3}, status={shearStatus} " +
-$"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})"); 
+$"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 }
 
                 // 6) Bending/Compression Usage Ratio
@@ -1006,6 +1105,600 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
     } //end public class LocalOptimizer
 
 
+    public class EquilibriumMatrixVerifier
+    {
+        /// <summary>
+        /// Comprehensive verification of the equilibrium matrix construction
+        /// </summary>
+        public static void VerifyEquilibriumMatrix(ProblemData data,
+                                                 List<FaceVertexPair> faceVertexPairs,
+                                                 GRBVar[] fAll,
+                                                 GRBVar lambda,
+                                                 GeometryModel geometry)
+        {
+            Console.WriteLine("=== EQUILIBRIUM MATRIX VERIFICATION ===");
+
+            // Basic dimension checks
+            VerifyMatrixDimensions(data, faceVertexPairs, fAll);
+
+            // Structural analysis
+            AnalyzeMatrixStructure(data);
+
+            // Force direction verification
+            VerifyForceDirections(data, faceVertexPairs, geometry);
+
+            // Load vector verification
+            VerifyLoadVectors(data);
+
+            // Detailed matrix content analysis
+            AnalyzeMatrixContent(data);
+
+            // Row-wise equilibrium check
+            VerifyEquilibriumStructure(data, geometry);
+
+            // Critical checks specific to your implementation
+            VerifyNormalTangentVectors(geometry);
+            VerifySignConventions(data, faceVertexPairs, geometry);
+        }
+
+        /// <summary>
+        /// Verify matrix dimensions match expected structure
+        /// </summary>
+        private static void VerifyMatrixDimensions(ProblemData data,
+                                                 List<FaceVertexPair> faceVertexPairs,
+                                                 GRBVar[] fAll)
+        {
+            Console.WriteLine("\n--- DIMENSION VERIFICATION ---");
+
+            int expectedCols = 2 * faceVertexPairs.Count; // 2 forces per face-vertex pair
+            int actualCols = data.NumCols;
+            int actualRows = data.NumRows;
+
+            Console.WriteLine($"Face-vertex pairs: {faceVertexPairs.Count}");
+            Console.WriteLine($"Expected columns: {expectedCols}");
+            Console.WriteLine($"Actual columns: {actualCols}");
+            Console.WriteLine($"Matrix rows: {actualRows}");
+            Console.WriteLine($"Force variables: {fAll.Length}");
+
+            if (expectedCols != actualCols)
+            {
+                Console.WriteLine($"ERROR: Column mismatch! Expected {expectedCols}, got {actualCols}");
+            }
+
+            if (actualCols != fAll.Length)
+            {
+                Console.WriteLine($"ERROR: Variable count mismatch! Matrix has {actualCols} columns, {fAll.Length} variables");
+            }
+
+            // Expected rows should be: 2 * numVertices (Fx, Fy) + numVertices (moments) = 3 * numVertices
+            // Or it could be different depending on your formulation
+            Console.WriteLine($"Rows should typically be 3 * num_vertices for 2D problems");
+        }
+
+        /// <summary>
+        /// Analyze the overall structure of matrix A
+        /// </summary>
+        private static void AnalyzeMatrixStructure(ProblemData data)
+        {
+            Console.WriteLine("\n--- MATRIX STRUCTURE ANALYSIS ---");
+
+            int rows = data.NumRows;
+            int cols = data.NumCols;
+            int nonZeros = 0;
+            double maxValue = 0;
+            double minValue = double.MaxValue;
+
+            // Count non-zeros and analyze values
+            for (int i = 0; i < rows; i++)
+            {
+                for (int j = 0; j < cols; j++)
+                {
+                    double val = Math.Abs(data.MatrixA[i, j]);
+                    if (val > 1e-15)
+                    {
+                        nonZeros++;
+                        maxValue = Math.Max(maxValue, val);
+                        minValue = Math.Min(minValue, val);
+                    }
+                }
+            }
+
+            double sparsity = (double)nonZeros / (rows * cols);
+
+            Console.WriteLine($"Non-zero entries: {nonZeros} / {rows * cols}");
+            Console.WriteLine($"Sparsity: {sparsity:F4}");
+            Console.WriteLine($"Value range: [{minValue:E3}, {maxValue:E3}]");
+            Console.WriteLine($"Condition indicator (max/min): {maxValue / minValue:E3}");
+
+            if (maxValue / minValue > 1e12)
+            {
+                Console.WriteLine("WARNING: Very large condition number - potential numerical issues!");
+            }
+        }
+
+        /// <summary>
+        /// Verify force directions are correctly represented in matrix A
+        /// </summary>
+        private static void VerifyForceDirections(ProblemData data,
+                                                List<FaceVertexPair> faceVertexPairs,
+                                                GeometryModel geometry)
+        {
+            Console.WriteLine("\n--- FORCE DIRECTION VERIFICATION ---");
+
+            // For each face-vertex pair, check if the corresponding columns make sense
+            for (int pairIdx = 0; pairIdx < Math.Min(5, faceVertexPairs.Count); pairIdx++) // Check first 5 pairs
+            {
+                int normalColIdx = 2 * pairIdx;     // f_n column
+                int tangentialColIdx = 2 * pairIdx + 1; // f_t column
+                var pair = faceVertexPairs[pairIdx];
+
+                Console.WriteLine($"\nPair {pairIdx} (Face {pair.FaceId}, Vertex {pair.VertexId}):");
+
+                // Get the face to access normal/tangent vectors
+                if (geometry.Faces.TryGetValue(pair.FaceId, out Face face))
+                {
+                    Console.WriteLine($"  Face normal: ({face.Normal[0]:F6}, {face.Normal[1]:F6})");
+                    Console.WriteLine($"  Face tangent: ({face.Tangent[0]:F6}, {face.Tangent[1]:F6})");
+
+                    // Verify unit vectors
+                    double nMag = Math.Sqrt(face.Normal[0] * face.Normal[0] + face.Normal[1] * face.Normal[1]);
+                    double tMag = Math.Sqrt(face.Tangent[0] * face.Tangent[0] + face.Tangent[1] * face.Tangent[1]);
+
+                    Console.WriteLine($"  Normal magnitude: {nMag:F6}");
+                    Console.WriteLine($"  Tangent magnitude: {tMag:F6}");
+
+                    if (Math.Abs(nMag - 1.0) > 0.01)
+                        Console.WriteLine($"  WARNING: Normal vector is not unit length!");
+                    if (Math.Abs(tMag - 1.0) > 0.01)
+                        Console.WriteLine($"  WARNING: Tangent vector is not unit length!");
+
+                    // Check orthogonality
+                    double dot = face.Normal[0] * face.Tangent[0] + face.Normal[1] * face.Tangent[1];
+                    Console.WriteLine($"  Normal⋅Tangent: {dot:F6}");
+                    if (Math.Abs(dot) > 0.01)
+                        Console.WriteLine($"  WARNING: Normal and tangent are not orthogonal!");
+                }
+
+                // Analyze normal force column
+                AnalyzeForceColumn(data, normalColIdx, "Normal");
+
+                // Analyze tangential force column  
+                AnalyzeForceColumn(data, tangentialColIdx, "Tangential");
+            }
+        }
+
+        /// <summary>
+        /// Analyze a single force column in the matrix
+        /// </summary>
+        private static void AnalyzeForceColumn(ProblemData data, int colIdx, string forceType)
+        {
+            if (colIdx >= data.NumCols) return;
+
+            Console.WriteLine($"  {forceType} force column {colIdx}:");
+
+            // For equilibrium matrices, each column represents the TOTAL effect of a unit force
+            // on ALL equilibrium equations, not a unit vector itself
+
+            int numBlocks = data.NumRows / 3; // Assuming 3 equations per block (Fx, Fy, M)
+
+            double totalFxContrib = 0, totalFyContrib = 0, totalMContrib = 0;
+
+            // Sum contributions to all Fx equations (every 3rd row starting from 0)
+            for (int blockIdx = 0; blockIdx < numBlocks; blockIdx++)
+            {
+                int fxRow = blockIdx * 3;
+                if (fxRow < data.NumRows)
+                    totalFxContrib += data.MatrixA[fxRow, colIdx];
+            }
+
+            // Sum contributions to all Fy equations (every 3rd row starting from 1)
+            for (int blockIdx = 0; blockIdx < numBlocks; blockIdx++)
+            {
+                int fyRow = blockIdx * 3 + 1;
+                if (fyRow < data.NumRows)
+                    totalFyContrib += data.MatrixA[fyRow, colIdx];
+            }
+
+            // Sum contributions to all Moment equations (every 3rd row starting from 2)
+            for (int blockIdx = 0; blockIdx < numBlocks; blockIdx++)
+            {
+                int mRow = blockIdx * 3 + 2;
+                if (mRow < data.NumRows)
+                    totalMContrib += Math.Abs(data.MatrixA[mRow, colIdx]);
+            }
+
+            Console.WriteLine($"    Total Fx contributions: {totalFxContrib:F6}");
+            Console.WriteLine($"    Total Fy contributions: {totalFyContrib:F6}");
+            Console.WriteLine($"    Total |Moment| contributions: {totalMContrib:F6}");
+
+            // For internal forces, total Fx and Fy should be ≈0 (Newton's 3rd law)
+            // For boundary forces, they may be non-zero
+            if (Math.Abs(totalFxContrib) < 1e-6 && Math.Abs(totalFyContrib) < 1e-6)
+            {
+                Console.WriteLine($"    ✓ Internal force (sums to zero)");
+            }
+            else
+            {
+                Console.WriteLine($"    → Boundary force or force imbalance");
+            }
+        }
+
+        /// <summary>
+        /// Check if normal and tangential force vectors are orthogonal
+        /// </summary>
+        private static void CheckOrthogonality(ProblemData data, int normalCol, int tangentialCol)
+        {
+            if (normalCol >= data.NumCols || tangentialCol >= data.NumCols) return;
+
+            double dotProduct = 0;
+            int numVertices = data.NumRows / 3;
+
+            // Compute dot product of force direction vectors (Fx and Fy components only)
+            for (int i = 0; i < Math.Min(2 * numVertices, data.NumRows); i++)
+            {
+                dotProduct += data.MatrixA[i, normalCol] * data.MatrixA[i, tangentialCol];
+            }
+
+            Console.WriteLine($"    Normal⋅Tangential dot product: {dotProduct:F6}");
+
+            if (Math.Abs(dotProduct) > 0.1)
+            {
+                Console.WriteLine($"    WARNING: Normal and tangential vectors are not orthogonal!");
+            }
+        }
+
+        /// <summary>
+        /// Verify load vectors G and B
+        /// </summary>
+        private static void VerifyLoadVectors(ProblemData data)
+        {
+            Console.WriteLine("\n--- LOAD VECTOR VERIFICATION ---");
+
+            if (data.G != null)
+            {
+                Console.WriteLine($"Gravity vector G: length {data.G.Length}");
+                double gMagnitude = Math.Sqrt(data.G.Sum(x => x * x));
+                Console.WriteLine($"  Magnitude: {gMagnitude:F6}");
+                Console.WriteLine($"  Max component: {data.G.Max():F6}");
+                Console.WriteLine($"  Min component: {data.G.Min():F6}");
+            }
+
+            if (data.B != null)
+            {
+                Console.WriteLine($"Applied load vector B: length {data.B.Length}");
+                double bMagnitude = Math.Sqrt(data.B.Sum(x => x * x));
+                Console.WriteLine($"  Magnitude: {bMagnitude:F6}");
+                Console.WriteLine($"  Max component: {data.B.Max():F6}");
+                Console.WriteLine($"  Min component: {data.B.Min():F6}");
+            }
+
+            // Check if G and B have same length as matrix rows
+            if (data.G != null && data.G.Length != data.NumRows)
+            {
+                Console.WriteLine($"ERROR: G vector length {data.G.Length} ≠ matrix rows {data.NumRows}");
+            }
+
+            if (data.B != null && data.B.Length != data.NumRows)
+            {
+                Console.WriteLine($"ERROR: B vector length {data.B.Length} ≠ matrix rows {data.NumRows}");
+            }
+        }
+
+        /// <summary>
+        /// Detailed analysis of matrix content
+        /// </summary>
+        private static void AnalyzeMatrixContent(ProblemData data)
+        {
+            Console.WriteLine("\n--- DETAILED MATRIX CONTENT ---");
+
+            // Show first few rows and columns
+            int showRows = Math.Min(6, data.NumRows);
+            int showCols = Math.Min(8, data.NumCols);
+
+            Console.WriteLine("First few matrix entries:");
+            Console.Write("Row\\Col".PadRight(8));
+            for (int j = 0; j < showCols; j++)
+            {
+                Console.Write($"{j,10}");
+            }
+            Console.WriteLine();
+
+            for (int i = 0; i < showRows; i++)
+            {
+                Console.Write($"{i,6}: ");
+                for (int j = 0; j < showCols; j++)
+                {
+                    Console.Write($"{data.MatrixA[i, j],10:F3}");
+                }
+                Console.WriteLine();
+            }
+
+            // Check for suspicious patterns
+            CheckForSuspiciousPatterns(data);
+        }
+
+        /// <summary>
+        /// Check for common matrix construction errors
+        /// </summary>
+        private static void CheckForSuspiciousPatterns(ProblemData data)
+        {
+            Console.WriteLine("\n--- SUSPICIOUS PATTERN DETECTION ---");
+
+            int zeroRows = 0;
+            int zeroCols = 0;
+
+            // Check for zero rows
+            for (int i = 0; i < data.NumRows; i++)
+            {
+                bool isZeroRow = true;
+                for (int j = 0; j < data.NumCols; j++)
+                {
+                    if (Math.Abs(data.MatrixA[i, j]) > 1e-15)
+                    {
+                        isZeroRow = false;
+                        break;
+                    }
+                }
+                if (isZeroRow)
+                {
+                    Console.WriteLine($"WARNING: Row {i} is all zeros!");
+                    zeroRows++;
+                }
+            }
+
+            // Check for zero columns
+            for (int j = 0; j < data.NumCols; j++)
+            {
+                bool isZeroCol = true;
+                for (int i = 0; i < data.NumRows; i++)
+                {
+                    if (Math.Abs(data.MatrixA[i, j]) > 1e-15)
+                    {
+                        isZeroCol = false;
+                        break;
+                    }
+                }
+                if (isZeroCol)
+                {
+                    Console.WriteLine($"WARNING: Column {j} is all zeros!");
+                    zeroCols++;
+                }
+            }
+
+            Console.WriteLine($"Zero rows: {zeroRows}, Zero columns: {zeroCols}");
+
+            // Check for identical rows (might indicate duplicated constraints)
+            CheckForIdenticalRows(data);
+        }
+
+        /// <summary>
+        /// Check for identical or nearly identical rows
+        /// </summary>
+        private static void CheckForIdenticalRows(ProblemData data)
+        {
+            for (int i = 0; i < data.NumRows - 1; i++)
+            {
+                for (int j = i + 1; j < data.NumRows; j++)
+                {
+                    double diff = 0;
+                    for (int k = 0; k < data.NumCols; k++)
+                    {
+                        diff += Math.Abs(data.MatrixA[i, k] - data.MatrixA[j, k]);
+                    }
+
+                    if (diff < 1e-12)
+                    {
+                        Console.WriteLine($"WARNING: Rows {i} and {j} are nearly identical!");
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Verify that equilibrium equations have the expected structure
+        /// </summary>
+        private static void VerifyEquilibriumStructure(ProblemData data, GeometryModel geometry)
+        {
+            Console.WriteLine("\n--- EQUILIBRIUM STRUCTURE VERIFICATION ---");
+
+            // For a masonry arch, expect:
+            // - Force equilibrium equations (ΣFx = 0, ΣFy = 0) 
+            // - Moment equilibrium equations (ΣM = 0)
+
+            int numVertices = data.NumRows / 3; // Assuming 3 equations per vertex
+
+            Console.WriteLine($"Assuming {numVertices} vertices with 3 equations each");
+
+            // Check Fx equilibrium equations (should sum all x-components of forces)
+            for (int vertexIdx = 0; vertexIdx < Math.Min(3, numVertices); vertexIdx++)
+            {
+                int rowIdx = vertexIdx; // Fx equation for this vertex
+
+                double sumNormalX = 0;
+                double sumTangentialX = 0;
+
+                // Sum contributions from all force pairs
+                for (int pairIdx = 0; pairIdx < data.NumCols / 2; pairIdx++)
+                {
+                    sumNormalX += data.MatrixA[rowIdx, 2 * pairIdx];     // Normal force X component
+                    sumTangentialX += data.MatrixA[rowIdx, 2 * pairIdx + 1]; // Tangential force X component
+                }
+
+                Console.WriteLine($"Vertex {vertexIdx} Fx equation:");
+                Console.WriteLine($"  Sum of normal X components: {sumNormalX:F6}");
+                Console.WriteLine($"  Sum of tangential X components: {sumTangentialX:F6}");
+
+                // For global equilibrium, these should sum to specific values depending on the problem
+            }
+        }
+
+        /// <summary>
+        /// Verify normal and tangent vectors in the geometry are properly computed
+        /// </summary>
+        private static void VerifyNormalTangentVectors(GeometryModel geometry)
+        {
+            Console.WriteLine("\n--- NORMAL/TANGENT VECTOR VERIFICATION ---");
+
+            foreach (var faceKvp in geometry.Faces)
+            {
+                var face = faceKvp.Value;
+                Console.WriteLine($"Face {face.Id}:");
+
+                // Check if normal and tangent are unit vectors
+                double nMag = Math.Sqrt(face.Normal[0] * face.Normal[0] + face.Normal[1] * face.Normal[1]);
+                double tMag = Math.Sqrt(face.Tangent[0] * face.Tangent[0] + face.Tangent[1] * face.Tangent[1]);
+
+                Console.WriteLine($"  Normal: ({face.Normal[0]:F6}, {face.Normal[1]:F6}), mag = {nMag:F6}");
+                Console.WriteLine($"  Tangent: ({face.Tangent[0]:F6}, {face.Tangent[1]:F6}), mag = {tMag:F6}");
+
+                if (Math.Abs(nMag - 1.0) > 0.01)
+                    Console.WriteLine($"  ERROR: Normal vector magnitude {nMag:F6} ≠ 1.0");
+                if (Math.Abs(tMag - 1.0) > 0.01)
+                    Console.WriteLine($"  ERROR: Tangent vector magnitude {tMag:F6} ≠ 1.0");
+
+                // Check orthogonality
+                double dot = face.Normal[0] * face.Tangent[0] + face.Normal[1] * face.Tangent[1];
+                Console.WriteLine($"  Dot product: {dot:F6}");
+                if (Math.Abs(dot) > 0.01)
+                    Console.WriteLine($"  ERROR: Vectors not orthogonal! Dot = {dot:F6}");
+
+                // Verify face geometry makes sense
+                if (face.VertexIds.Count == 2)
+                {
+                    var v1 = geometry.Vertices[face.VertexIds[0]];
+                    var v2 = geometry.Vertices[face.VertexIds[1]];
+
+                    // Face vector (v1 to v2)
+                    double dx = v2.X - v1.X;
+                    double dy = v2.Y - v1.Y;
+                    double faceLength = Math.Sqrt(dx * dx + dy * dy);
+
+                    Console.WriteLine($"  Face length: {faceLength:F6} (stored: {face.Length:F6})");
+
+                    if (Math.Abs(faceLength - face.Length) > 0.01)
+                        Console.WriteLine($"  WARNING: Computed length {faceLength:F6} ≠ stored length {face.Length:F6}");
+
+                    // Check if tangent aligns with face direction
+                    double[] faceDir = { dx / faceLength, dy / faceLength };
+                    double tangentDot = Math.Abs(faceDir[0] * face.Tangent[0] + faceDir[1] * face.Tangent[1]);
+                    Console.WriteLine($"  Tangent-Face alignment: {tangentDot:F6}");
+
+                    if (tangentDot < 0.99)
+                        Console.WriteLine($"  WARNING: Tangent not aligned with face direction!");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Verify sign conventions in the equilibrium matrix
+        /// </summary>
+        private static void VerifySignConventions(ProblemData data, List<FaceVertexPair> faceVertexPairs, GeometryModel geometry)
+        {
+            Console.WriteLine("\n--- SIGN CONVENTION VERIFICATION ---");
+
+            // Check a few specific cases to verify signs
+            for (int pairIdx = 0; pairIdx < Math.Min(3, faceVertexPairs.Count); pairIdx++)
+            {
+                var pair = faceVertexPairs[pairIdx];
+                if (!geometry.Faces.TryGetValue(pair.FaceId, out Face face)) continue;
+                if (!geometry.Vertices.TryGetValue(pair.VertexId, out ContactPoint vertex)) continue;
+
+                Console.WriteLine($"\nChecking pair {pairIdx}: Face {pair.FaceId}, Vertex {pair.VertexId}");
+
+                int colN = 2 * pairIdx;
+                int colT = 2 * pairIdx + 1;
+
+                // Check blocks J and K
+                Console.WriteLine($"  Face connects Block {face.BlockJ} to Block {face.BlockK}");
+
+                // For each block this face touches, verify sign consistency
+                CheckBlockContribution(data, colN, colT, face.BlockJ, face, vertex, geometry, "BlockJ", true);
+                CheckBlockContribution(data, colN, colT, face.BlockK, face, vertex, geometry, "BlockK", false);
+            }
+        }
+
+        /// <summary>
+        /// Check the contribution of a face-vertex pair to a specific block's equilibrium
+        /// </summary>
+        private static void CheckBlockContribution(ProblemData data, int colN, int colT, int blockId,
+                                                 Face face, ContactPoint vertex, GeometryModel geometry,
+                                                 string blockName, bool isBlockJ)
+        {
+            if (blockId <= 0) return; // Skip support blocks
+
+            if (!geometry.Blocks.TryGetValue(blockId, out Block block)) return;
+
+            // Find this block's row indices (assuming 3 equations per block)
+            var nonSupportBlocks = geometry.Blocks.Values
+                .Where(b => b.Id > 0)
+                .OrderBy(b => b.Id)
+                .ToList();
+
+            var blockRowMap = nonSupportBlocks
+                .Select((b, idx) => new { b.Id, idx })
+                .ToDictionary(x => x.Id, x => x.idx * 3);
+
+            if (!blockRowMap.TryGetValue(blockId, out int baseRow)) return;
+
+            Console.WriteLine($"    {blockName} (ID {blockId}) base row: {baseRow}");
+
+            // Get matrix coefficients for this block
+            double fxN = data.MatrixA[baseRow, colN];       // Fx from normal force
+            double fxT = data.MatrixA[baseRow, colT];       // Fx from tangential force
+            double fyN = data.MatrixA[baseRow + 1, colN];   // Fy from normal force
+            double fyT = data.MatrixA[baseRow + 1, colT];   // Fy from tangential force
+            double mN = data.MatrixA[baseRow + 2, colN];    // Moment from normal force
+            double mT = data.MatrixA[baseRow + 2, colT];    // Moment from tangential force
+
+            Console.WriteLine($"    Matrix coeffs: FxN={fxN:F3}, FxT={fxT:F3}, FyN={fyN:F3}, FyT={fyT:F3}");
+            Console.WriteLine($"    Moment coeffs: MN={mN:F3}, MT={mT:F3}");
+
+            // Verify these match expected values based on normal/tangent directions
+            double expectedFxN = isBlockJ ? -face.Normal[0] : +face.Normal[0];
+            double expectedFxT = isBlockJ ? -face.Tangent[0] : +face.Tangent[0];
+            double expectedFyN = isBlockJ ? -face.Normal[1] : +face.Normal[1];
+            double expectedFyT = isBlockJ ? -face.Tangent[1] : +face.Tangent[1];
+
+            Console.WriteLine($"    Expected: FxN={expectedFxN:F3}, FxT={expectedFxT:F3}, FyN={expectedFyN:F3}, FyT={expectedFyT:F3}");
+
+            // Check moment arms
+            double xRel = vertex.X - block.CentroidX;
+            double yRel = vertex.Y - block.CentroidY;
+            double expectedMN = isBlockJ ? -(xRel * face.Normal[1] - yRel * face.Normal[0]) : +(xRel * face.Normal[1] - yRel * face.Normal[0]);
+            double expectedMT = isBlockJ ? -(xRel * face.Tangent[1] - yRel * face.Tangent[0]) : +(xRel * face.Tangent[1] - yRel * face.Tangent[0]);
+
+            Console.WriteLine($"    Expected moments: MN={expectedMN:F3}, MT={expectedMT:F3}");
+            Console.WriteLine($"    Lever arm: ({xRel:F3}, {yRel:F3})");
+
+            // Check for discrepancies
+            if (Math.Abs(fxN - expectedFxN) > 1e-6) Console.WriteLine($"    ERROR: FxN mismatch!");
+            if (Math.Abs(fxT - expectedFxT) > 1e-6) Console.WriteLine($"    ERROR: FxT mismatch!");
+            if (Math.Abs(fyN - expectedFyN) > 1e-6) Console.WriteLine($"    ERROR: FyN mismatch!");
+            if (Math.Abs(fyT - expectedFyT) > 1e-6) Console.WriteLine($"    ERROR: FyT mismatch!");
+            if (Math.Abs(mN - expectedMN) > 1e-6) Console.WriteLine($"    ERROR: MN mismatch!");
+            if (Math.Abs(mT - expectedMT) > 1e-6) Console.WriteLine($"    ERROR: MT mismatch!");
+        }
+    }
+
+    // Extension method to call the verification
+    public static class ModelVerificationExtensions
+    {
+        public static void VerifyEquilibrium(this GRBModel model, ProblemData data,
+                                           List<FaceVertexPair> faceVertexPairs,
+                                           GRBVar[] fAll, GRBVar lambda, GeometryModel geometry)
+        {
+            EquilibriumMatrixVerifier.VerifyEquilibriumMatrix(data, faceVertexPairs, fAll, lambda, geometry);
+        }
+    }
+
+
+
+
+
+
+
+
+
     // -----------------------------------------------------------------
     // 3) Program.Main: file I/O for matrix and faces
     // -----------------------------------------------------------------
@@ -1020,7 +1713,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_cairo_friction_0e4.txt"   //data_pseudoparallel_friction_0e4
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_pseudoparallel_friction_0e4.txt"   //data_pseudoparallel_friction_0e4
                 , geometry, data);
                 ComputeFaceNormalsFromGeometry(geometry);
                 // validate data
@@ -1573,6 +2266,15 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 Console.WriteLine($"Face {f.Id}: {statusMsg}");
             }
         }
+
+
+
+
+
+
+
+
+
 
     } // end of Program
 
