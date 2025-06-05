@@ -285,9 +285,9 @@ namespace InterlockingMasonryLocalForces
                     AddContactConstraints(model, geometry, data);
 
                     // 6)   Add face eccentricity constraints 
-                     AddFaceEccConstraintsAroundV1(model, geometry, data);
-                    //AddHybridEccConstraints(model, geometry, data);
-
+                    // AddFaceEccConstraintsAroundV1(model, geometry, data);
+                    //AddMidpointEccConstraints(model, geometry, data);
+                    AddFaceMidpointBendingConstraintsNoEK(model, geometry, data);
                     // 7) Objective: maximize lambda
                     GRBLinExpr obj = 0.0;
                         obj.AddTerm(1.0, lambda);
@@ -326,6 +326,7 @@ namespace InterlockingMasonryLocalForces
                     if (model.Status == GRB.Status.OPTIMAL)
                     {
                         VerifyPostSolution(model, data, data.Mu);
+                      //  VerifyMidpointEccentricity(model, geometry, data); // Add this line fo new moment
                     }
 
 
@@ -558,7 +559,7 @@ namespace InterlockingMasonryLocalForces
 
 
         // vertex based friction limit
-        /*
+        
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             foreach (var faceKvp in geometry.Faces)
@@ -595,10 +596,10 @@ namespace InterlockingMasonryLocalForces
                     }
                 }
             }
-        }*/
+        }
 
         // face based friction limit
-
+        /*
         /// For each pair j, friction constraints: -mu * fN_j <= fT_j <= mu * fN_j
         /// plus no tension fN_j >= 0 (already in the variable bound).
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
@@ -665,8 +666,299 @@ namespace InterlockingMasonryLocalForces
                     }
                 }
             }
-          
-       
+          */
+
+        public void AddFaceMidpointBendingConstraintsNoEK(
+GRBModel model,
+GeometryModel geometry,
+ProblemData data)
+        {
+            double sigmaC = data.SigmaC;
+            if (sigmaC < 1e-12)
+            {
+                Console.WriteLine("Skipping face bending checks because σc ~ 0.");
+                return;
+            }
+
+            Console.WriteLine("\n--- Face Midpoint‐Based Bending Constraints (No eK) ---");
+
+            foreach (Face face in geometry.Faces.Values)
+            {
+                // We only handle 2‐vertex faces in 2D
+                if (face.VertexIds.Count != 2)
+                    continue;
+
+                int vId1 = face.VertexIds[0];
+                int vId2 = face.VertexIds[1];
+
+                // Indices for normal forces at these vertices
+                int idx1 = GetPairIndex(face.Id, vId1);
+                int idx2 = GetPairIndex(face.Id, vId2);
+                if (idx1 < 0 || idx2 < 0)
+                {
+                    Console.WriteLine($"Skipping face {face.Id}: no fN index found.");
+                    continue;
+                }
+
+                // Retrieve the 2 normal‐force variables from your global equilibrium array
+                GRBVar fn1 = fAll[2 * idx1];
+                GRBVar fn2 = fAll[2 * idx2];
+
+                // Summation: total normal on this face, fnk
+                double L = face.Length;
+                double tk = face.Thickness;
+
+                // Create a variable for fnk with an upper bound ~ sigmaC * L * tk
+                double maxForce = sigmaC * L * tk;
+                GRBVar fnk = model.AddVar(
+                    0.0,
+                    maxForce,
+                    0.0,
+                    GRB.CONTINUOUS,
+                    $"fnk_face{face.Id}"
+                );
+
+                // Enforce fnk = fn1 + fn2
+                model.AddConstr(fnk == fn1 + fn2, $"SumNormal_face_{face.Id}");
+
+                // Now define e ∈ [0, L/2], the distance of the resultant from the face center
+                GRBVar e = model.AddVar(
+                    0.0,
+                    L / 2.0,
+                    0.0,
+                    GRB.CONTINUOUS,
+                    $"e_face{face.Id}"
+                );
+
+                // Stress‐block constraint:
+                //   area = t * [ L − 2·e ]
+                //   => fnk ≤ σc × area = σc × t × [ L − 2 e ]
+                // or => fnk − σc·t·L + 2 σc·t· e ≤ 0
+                {
+                    double coef = 2.0 * sigmaC * tk;   // for e
+                    double constTerm = sigmaC * tk * L; // for L
+
+                    GRBLinExpr expr = new GRBLinExpr();
+                    expr.AddTerm(1.0, fnk);
+                    expr.AddTerm(coef, e);          // + 2 σc t e
+                    expr.AddConstant(-constTerm);   // − σc t L
+                    model.AddConstr(expr <= 0.0, $"Strength_face_{face.Id}");
+                }
+            }
+        }
+
+
+
+
+
+
+        /// <summary>
+        /// Improved eccentricity constraints using midpoint-based formulation
+        /// This is much more symmetric and physically meaningful than vertex-based approach
+        /// </summary>
+        private void AddMidpointEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+        {
+            double sigmaC = data.SigmaC;
+
+            Console.WriteLine("\n--- Midpoint-Based Eccentricity Constraints ---");
+
+            foreach (var fKvp in geometry.Faces)
+            {
+                Face face = fKvp.Value;
+                if (face.VertexIds.Count != 2) continue;
+
+                // Get vertex IDs (ordered by your coordinate-based sorting)
+                int vertexId1 = face.VertexIds[0];  // "Left" vertex (smaller x, or smaller y if x same)
+                int vertexId2 = face.VertexIds[1];  // "Right" vertex
+
+                // Get vertex coordinates
+                ContactPoint vertex1 = _geometry.Vertices[vertexId1];
+                ContactPoint vertex2 = _geometry.Vertices[vertexId2];
+
+                // Get pair indices for normal forces
+                int idx1 = GetPairIndex(face.Id, vertexId1);
+                int idx2 = GetPairIndex(face.Id, vertexId2);
+
+                if (idx1 < 0 || idx2 < 0)
+                {
+                    Console.WriteLine($"Skipping midpoint ecc constraints for Face {face.Id}.");
+                    continue;
+                }
+
+                // Normal forces at vertices
+                GRBVar fn1 = fAll[2 * idx1];   // normal at vertex 1
+                GRBVar fn2 = fAll[2 * idx2];   // normal at vertex 2
+
+                // Face length
+                double dx = vertex2.X - vertex1.X;
+                double dy = vertex2.Y - vertex1.Y;
+                double L = Math.Sqrt(dx * dx + dy * dy);
+
+                // 1) Total normal force: fnk = fn1 + fn2
+                double maxNormalForce = sigmaC * face.Length * face.Thickness;  // Physical limit
+                GRBVar fnk = model.AddVar(0.0, maxNormalForce, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");
+                {
+                    GRBLinExpr sumExpr = new GRBLinExpr();
+                    sumExpr.AddTerm(1.0, fn1);
+                    sumExpr.AddTerm(1.0, fn2);
+                    model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
+                }
+
+                // 2) Eccentricity from midpoint: e_mid ∈ [-L/2, +L/2]
+                //    Positive e_mid = toward vertex 2
+                //    Negative e_mid = toward vertex 1
+                GRBVar e_mid = model.AddVar(-L / 2.0, L / 2.0, 0.0, GRB.CONTINUOUS, $"eMid_face{face.Id}");
+                faceEccVars[face.Id] = e_mid;  // Store for debugging
+                
+                // 2b) OPTIONAL: Calculate old eK for backward compatibility
+                                               //     eK = L/2 + e_mid  (distance from vertex 1 to force application point)
+                GRBVar eK = model.AddVar(0.0, L, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
+                {
+                    GRBLinExpr eK_def = new GRBLinExpr();
+                    eK_def.AddConstant(L / 2.0);
+                    eK_def.AddTerm(1.0, e_mid);
+                    model.AddConstr(eK == eK_def, $"eK_from_eMid_face{face.Id}");
+                }
+
+                // 3) MOMENT EQUILIBRIUM about face midpoint:
+                //    fn1 * (L/2) - fn2 * (L/2) = fnk * e_mid
+                //    
+                //    This says: moment from fn1 (at +L/2 from center) minus moment from fn2 (at -L/2 from center)
+                //    equals the moment from the resultant fnk at distance e_mid from center
+                {
+                    GRBQuadExpr momentEq = new GRBQuadExpr();
+                    momentEq.AddTerm(L / 2.0, fn1);      // +fn1 * L/2
+                    momentEq.AddTerm(-L / 2.0, fn2);     // -fn2 * L/2  
+                    momentEq.AddTerm(-1.0, fnk, e_mid); // -fnk * e_mid
+
+                    model.AddQConstr(momentEq == 0.0, $"MidpointMoment_face{face.Id}");
+                }
+
+                // 4) STRENGTH CONSTRAINT based on rectangular stress block:
+                //    Compressed length = L - 2*|e_mid|
+                //    Maximum force = σc * t * (L - 2*|e_mid|) = 2*σc*t*(L/2 - |e_mid|)
+                //    
+                //    Since we can't directly use |e_mid| in linear constraints, we need to handle
+                //    the absolute value. We'll use two constraints to bound the compressed area.
+
+                double t = face.Thickness;
+                if (sigmaC > 1e-9 && t > 1e-9)
+                {
+                    double sigma_t = sigmaC * t;
+
+                    // Case 1: e_mid ≥ 0 (force toward vertex 2)
+                    // Compressed length = L - 2*e_mid, so fnk ≤ σc*t*(L - 2*e_mid) = 2*σc*t*(L/2 - e_mid)
+                    {
+                        GRBLinExpr lhs1 = new GRBLinExpr();
+                        lhs1.AddTerm(1.0, fnk);
+                        lhs1.AddTerm(2.0 * sigma_t, e_mid);
+                        model.AddConstr(lhs1 <= sigma_t * L, $"StrengthPos_face{face.Id}");
+                    }
+
+                    // Case 2: e_mid ≤ 0 (force toward vertex 1) 
+                    // Compressed length = L - 2*|e_mid| = L + 2*e_mid (since e_mid < 0)
+                    // So fnk ≤ σc*t*(L + 2*e_mid) = 2*σc*t*(L/2 + e_mid)
+                    {
+                        GRBLinExpr lhs2 = new GRBLinExpr();
+                        lhs2.AddTerm(1.0, fnk);
+                        lhs2.AddTerm(-2.0 * sigma_t, e_mid);  // Note the negative sign
+                        model.AddConstr(lhs2 <= sigma_t * L, $"StrengthNeg_face{face.Id}");
+                    }
+
+                    // Additional constraint: ensure some compression remains
+                    // |e_mid| ≤ L/2 is automatically enforced by variable bounds,
+                    // but we can add a tighter constraint to ensure fnk > 0 when needed
+
+                    Console.WriteLine($"Face {face.Id}: e_mid ∈ [-{L / 2.0:F3}, +{L / 2.0:F3}], max_force = {maxNormalForce:F1}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Verification method to check if the midpoint formulation is working correctly
+        /// </summary>
+        /// <summary>
+        /// Verification method to check if the midpoint formulation is working correctly
+        /// </summary>
+        private void VerifyMidpointEccentricity(GRBModel model, GeometryModel geometry, ProblemData data)
+        {
+            if (model.Status != GRB.Status.OPTIMAL) return;
+
+            Console.WriteLine("\n=== MIDPOINT ECCENTRICITY VERIFICATION ===");
+
+            foreach (var faceKvp in geometry.Faces)
+            {
+                Face face = faceKvp.Value;
+                if (face.VertexIds.Count != 2) continue;
+
+                int idx1 = GetPairIndex(face.Id, face.VertexIds[0]);
+                int idx2 = GetPairIndex(face.Id, face.VertexIds[1]);
+
+                if (idx1 < 0 || idx2 < 0) continue;
+
+                // Get solution values
+                double fn1 = fAll[2 * idx1].X;
+                double fn2 = fAll[2 * idx2].X;
+                double fnk = fn1 + fn2;
+                double L = face.Length;
+
+                // Get eccentricity values
+                double e_mid = 0, eK = 0;
+                bool foundEMid = false, foundEK = false;
+
+                if (faceEccVars.TryGetValue(face.Id, out GRBVar eMidVar))
+                {
+                    e_mid = eMidVar.X;
+                    foundEMid = true;
+                }
+
+
+                    // eK variable doesn't exist, calculate it manually
+                    eK = L / 2.0 + e_mid;
+     
+                    // Check moment equilibrium: fn1*(L/2) - fn2*(L/2) = fnk*e_mid
+                    double leftSide = fn1 * (L / 2.0) - fn2 * (L / 2.0);
+                    double rightSide = fnk * e_mid;
+                    double momentError = Math.Abs(leftSide - rightSide);
+
+                    // Also check old formulation: fnk * eK = fn2 * L
+                    double oldLeft = fnk * eK;
+                    double oldRight = fn2 * L;
+                    double oldMomentError = Math.Abs(oldLeft - oldRight);
+
+                    // Check strength constraint
+                    double compressedLength = L - 2.0 * Math.Abs(e_mid);
+                    double maxAllowableForce = data.SigmaC * face.Thickness * compressedLength;
+                    double strengthUsage = fnk / (maxAllowableForce + 1e-12);
+
+                    // Check old strength constraints (for comparison)
+                    double denom = 2.0 * data.SigmaC * face.Thickness;
+                    bool oldStrengthUp = (eK + fnk / denom) <= (L + 1e-6);
+                    bool oldStrengthLo = (eK - fnk / denom) >= -1e-6;
+
+                    Console.WriteLine($"Face {face.Id}:");
+                    Console.WriteLine($"  Forces: fn1={fn1:F1}, fn2={fn2:F1}, fnk={fnk:F1}");
+                    Console.WriteLine($"  Eccentricities: e_mid={e_mid:F4}, eK={eK:F4} (should be {L / 2.0 + e_mid:F4})");
+                    Console.WriteLine($"  NEW moment check: {leftSide:F2} ≈ {rightSide:F2}, error={momentError:F6}");
+                    Console.WriteLine($"  OLD moment check: {oldLeft:F2} ≈ {oldRight:F2}, error={oldMomentError:F6}");
+                    Console.WriteLine($"  Compressed length: {compressedLength:F3} (of {L:F3})");
+                    Console.WriteLine($"  Strength usage: {strengthUsage:F3}");
+                    Console.WriteLine($"  Old strength constraints: Up={oldStrengthUp}, Lo={oldStrengthLo}");
+
+                    if (momentError > 1e-3)
+                        Console.WriteLine($"    ⚠️  NEW MOMENT EQUILIBRIUM ERROR!");
+                    if (oldMomentError > 1e-3)
+                        Console.WriteLine($"    ⚠️  OLD MOMENT EQUILIBRIUM ERROR!");
+                    if (strengthUsage > 1.01)
+                        Console.WriteLine($"    ⚠️  STRENGTH VIOLATION!");
+                    if (!oldStrengthUp || !oldStrengthLo)
+                        Console.WriteLine($"    ⚠️  OLD STRENGTH CONSTRAINTS VIOLATED!");
+                
+            }
+        }
+
+
+        /*
         private void AddFaceEccConstraintsAroundV1(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             double sigmaC = data.SigmaC;
@@ -725,7 +1017,7 @@ namespace InterlockingMasonryLocalForces
                 //    e.g. eK in [-0.5*Lk, 1.5*Lk], etc.
                 GRBVar eK = model.AddVar(0.0, Lk, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
 
-                faceEccVars[face.Id] = eK;  // (Optional) Keep a reference for debugging
+                faceEccVars[face.Id] = eK;  //  Keep a reference for debugging
 
                 // 4) "Moment about v1":  fnk * eK = fn2 * Lk
                 //    i.e. the total normal force times its lever arm about v1 
@@ -765,9 +1057,11 @@ namespace InterlockingMasonryLocalForces
                 }
             }
         }
+        */
+
 
         /// <summary>
-         
+
         ///  printing the solution
         private void PrintSolution(GRBModel model)
         {
