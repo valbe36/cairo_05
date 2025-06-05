@@ -1867,8 +1867,8 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                         $"Face {face.Id}: missing block J={face.BlockJ} or K={face.BlockK} in geometry!");
                     continue;
                 }
-                // Step 1: pick which block is J or K by centroid comparison
-                //         i.e., geometry-based rule: smaller X => J, tie => smaller Y => J
+                // STEP 1: Possibly swap BlockJ ↔ BlockK to ensure smaller x => J
+                //         (or if x's are very close, smaller y => J).
 
                 // We'll store the original IDs in local variables
                 int jId = face.BlockJ;
@@ -1919,6 +1919,29 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
 
                 var v1 = geometry.Vertices[v1Id];
                 var v2 = geometry.Vertices[v2Id];
+                // Vector from BlockJ to BlockK
+                double dCx = kRef.CentroidX - jRef.CentroidX;
+                double dCy = kRef.CentroidY - jRef.CentroidY;
+
+                // Vector from v1 → v2
+                double dx12 = v2.X - v1.X;
+                double dy12 = v2.Y - v1.Y;
+
+                // Cross = (v1→v2) × (J→K). 
+                // If cross < 0 => swap v1,v2 so that cross >= 0.
+                double crossCheck = dx12 * dCy - dy12 * dCx;
+                if (crossCheck < 0.0)
+                {
+                    // Swap the vertex IDs
+                    face.VertexIds[0] = v2Id;
+                    face.VertexIds[1] = v1Id;
+                    // Update local references
+                    v1Id = face.VertexIds[0];
+                    v2Id = face.VertexIds[1];
+                    v1 = geometry.Vertices[v1Id];
+                    v2 = geometry.Vertices[v2Id];
+                    // Now v1→v2 is consistent with J→K orientation
+                }
 
                 // Step 3: compute the tangent from v1 -> v2
                 double dx = v2.X - v1.X;
@@ -1939,10 +1962,9 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 double nx = +ty;
                 double ny = -tx;
 
-                // Step 5: flip normal if dot < 0 => ensure normal points from J->K
-                double dCx = (kRef.CentroidX - jRef.CentroidX);
-                double dCy = (kRef.CentroidY - jRef.CentroidY);
-
+                // STEP 5: Flip the normal if it does not point from J → K
+                //         i.e., if (nx, ny) · (K - J) < 0, then flip
+                // ----------------------------------------------------------------------
                 double dot = nx * dCx + ny * dCy;
                 if (dot < 0)
                 {
