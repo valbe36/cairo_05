@@ -285,8 +285,8 @@ namespace InterlockingMasonryLocalForces
                     AddContactConstraints(model, geometry, data);
 
                     // 6)   Add face eccentricity constraints 
-                    //  AddFaceEccConstraintsAroundV1(model, geometry, data);
-                    AddHybridEccConstraints(model, geometry, data);
+                     AddFaceEccConstraintsAroundV1(model, geometry, data);
+                    //AddHybridEccConstraints(model, geometry, data);
 
                     // 7) Objective: maximize lambda
                     GRBLinExpr obj = 0.0;
@@ -296,8 +296,8 @@ namespace InterlockingMasonryLocalForces
                         
 
                     model.Parameters.NumericFocus = 3;      // Maximum precision
-                    model.Parameters.FeasibilityTol = 1e-6;  // Less aggressive; 1e-9 Tighter
-                    model.Parameters.OptimalityTol = 1e-6;   // Less aggressive; 1e-9 Tighter
+                    model.Parameters.FeasibilityTol = 1e-9;  // Less aggressive; 1e-9 Tighter
+                    model.Parameters.OptimalityTol = 1e-9;   // Less aggressive; 1e-9 Tighter
                     model.Parameters.BarConvTol = 1e-8;      // Barrier convergence
                     model.Parameters.MarkowitzTol = 0.01;    // Numerical stability
                     model.Parameters.ScaleFlag = 2;          // Automatic scaling
@@ -307,13 +307,17 @@ namespace InterlockingMasonryLocalForces
 
                     // For debugging - disable some presolve steps
                     model.Parameters.Presolve = 1;           // Enable but conservative
-             
 
+                    // CRITICAL FOR QUADRATIC CONSTRAINTS:
+                    model.Parameters.NonConvex = 2;         // Enable non-convex quadratic optimization
+                    model.Parameters.Method = 2;            // Use barrier method
+                    model.Parameters.Crossover = 0;         // Disable crossover
+                    model.Parameters.PreQLinearize = 0;     // Don't linearize quadratic terms
 
                     // model.Parameters.MIPGap = 0.0005;
-                   // model.Parameters.TimeLimit = 100; // Limit to 60 seconds
+                    // model.Parameters.TimeLimit = 100; // Limit to 60 seconds
                     //model.Parameters.Quad = 1;       // Convex quadratic relaxation
-                    // model.Parameters.PreQLinearize = 1; // Linearize quadratic terms
+            
 
                     // 8) Solve
                     model.Optimize();
@@ -332,7 +336,7 @@ namespace InterlockingMasonryLocalForces
                 }
         }
 
-        // CRITICAL FIX 2: Add Debugging Method to Verify Matrix-Variable Correspondence
+        //  DEBUG  Add Debugging Method to Verify Matrix-Variable Correspondence
         private void VerifyMatrixVariableCorrespondence(GeometryModel geometry, ProblemData data)
         {
             Console.WriteLine("\n=== MATRIX-VARIABLE CORRESPONDENCE CHECK ===");
@@ -698,7 +702,9 @@ namespace InterlockingMasonryLocalForces
                 GRBVar fn2 = fAll[2 * idx2];   // normal at (face, v2)
 
                 // 1) fnk = fn1 + fn2
-                GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");
+                // GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");// a problem in quadratic
+                double realisticMaxForce = sigmaC * face.Length * face.Thickness;  // Physical limit
+                GRBVar fnk = model.AddVar(0.0, realisticMaxForce, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");  // GOOD: Realistic bound
                 {
                     GRBLinExpr sumExpr = new GRBLinExpr();
                     sumExpr.AddTerm(1.0, fn1);
@@ -761,85 +767,7 @@ namespace InterlockingMasonryLocalForces
         }
 
         /// <summary>
-        /// Simple fix: Add exact moment equilibrium as quadratic constraint
-        /// Keep McCormick for initialization, add exact constraint for accuracy
-        /// </summary>
-        private void AddHybridEccConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
-        {
-            double sigmaC = data.SigmaC;
-
-            Console.WriteLine("\n--- Hybrid Linearized + Exact Eccentricity Constraints ---");
-
-            foreach (var fKvp in geometry.Faces)
-            {
-                Face face = fKvp.Value;
-                if (face.VertexIds.Count != 2) continue;
-
-                int vertexId1 = face.VertexIds[0];
-                int vertexId2 = face.VertexIds[1];
-
-                ContactPoint vertex1 = _geometry.Vertices[vertexId1];
-                ContactPoint vertex2 = _geometry.Vertices[vertexId2];
-
-                int idx1 = GetPairIndex(face.Id, vertexId1);
-                int idx2 = GetPairIndex(face.Id, vertexId2);
-
-                if (idx1 < 0 || idx2 < 0) continue;
-
-                GRBVar fn1 = fAll[2 * idx1];
-                GRBVar fn2 = fAll[2 * idx2];
-
-                // Calculate face length
-                double dx = vertex2.X - vertex1.X;
-                double dy = vertex2.Y - vertex1.Y;
-                double Lk = Math.Sqrt(dx * dx + dy * dy);
-
-                // 1) Total normal force
-                GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");
-                {
-                    GRBLinExpr sumExpr = new GRBLinExpr();
-                    sumExpr.AddTerm(1.0, fn1);
-                    sumExpr.AddTerm(1.0, fn2);
-                    model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
-                }
-
-                // 2) Eccentricity variable
-                GRBVar eK = model.AddVar(0.0, Lk, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
-                faceEccVars[face.Id] = eK;
-
-                // 3) EXACT MOMENT EQUILIBRIUM (quadratic but exact)
-                {
-                    GRBQuadExpr mq = new GRBQuadExpr();
-                    mq.AddTerm(1.0, fnk, eK);  // +1 * (fnk * eK)
-                    mq.AddTerm(-Lk, fn2);      // -Lk * fn2
-                    model.AddQConstr(mq == 0.0, $"ExactMomentEq_face{face.Id}");
-                }
-
-                // 4) EXACT STRESS BLOCK CONSTRAINTS (your original - these were correct!)
-                double t_k = face.Thickness;
-                if (sigmaC > 1e-9 && t_k > 1e-9)
-                {
-                    double denom = 2.0 * sigmaC * t_k;
-
-                    {
-                        GRBLinExpr lhsUp = new GRBLinExpr();
-                        lhsUp.AddTerm(1.0, eK);
-                        lhsUp.AddTerm(1.0 / denom, fnk);
-                        model.AddConstr(lhsUp <= Lk, $"StrengthUp_face{face.Id}");
-                    }
-
-                    {
-                        GRBLinExpr lhsLo = new GRBLinExpr();
-                        lhsLo.AddTerm(1.0, eK);
-                        lhsLo.AddTerm(-1.0 / denom, fnk);
-                        model.AddConstr(lhsLo >= 0.0, $"StrengthLo_face{face.Id}");
-                    }
-                }
-
-                Console.WriteLine($"Face {face.Id}: Added EXACT quadratic moment equilibrium");
-            }
-        }
-
+         
         ///  printing the solution
         private void PrintSolution(GRBModel model)
         {
@@ -2163,23 +2091,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             Console.WriteLine("===============================\n");
         }
 
-        /*
-        // Insert vertices if not already present
-        static void AutoPopulateVertices(GeometryModel geometry)
-        {
-            foreach (var face in geometry.Faces.Values)
-            {
-                foreach (int vId in face.VertexIds)
-                {
-                    if (!geometry.Vertices.ContainsKey(vId))
-                    {
-                        geometry.Vertices[vId] = new ContactPoint { Id = vId };
-                    }
-                }
-            }
-            Console.WriteLine($"AutoPopulateVertices: now have {geometry.Vertices.Count} vertices in the model.");
-        }
-        */
+
         
         
         // be informed if some input data is modified by the solver 
