@@ -328,7 +328,8 @@ namespace InterlockingMasonryLocalForces
                     if (model.Status == GRB.Status.OPTIMAL)
                     {
                         VerifyPostSolution(model, data, data.Mu);
-                      //  VerifyMidpointEccentricity(model, geometry, data); // Add this line fo new moment
+                        //  VerifyMidpointEccentricity(model, geometry, data); // Add this line fo new moment
+                        AnalyzeEquilibriumEquations(model, geometry, data);
                     }
 
 
@@ -339,7 +340,7 @@ namespace InterlockingMasonryLocalForces
                 }
         }
 
-        //  DEBUG  Add Debugging Method to Verify Matrix-Variable Correspondence
+        //  DEBUG  1 Add Debugging Method to Verify Matrix-Variable Correspondence
         private void VerifyMatrixVariableCorrespondence(GeometryModel geometry, ProblemData data)
         {
             Console.WriteLine("\n=== MATRIX-VARIABLE CORRESPONDENCE CHECK ===");
@@ -381,8 +382,7 @@ namespace InterlockingMasonryLocalForces
             }
         }
 
-        // CRITICAL FIX 3: Enhanced Post-Solution Verification
-        // CRITICAL FIX 3: Enhanced Post-Solution Verification
+        // DEBUG 2 : Enhanced Post-Solution Verification
         private void VerifyPostSolution(GRBModel model, ProblemData data, double friction)
         {
             if (model.Status != GRB.Status.OPTIMAL) return;
@@ -488,8 +488,82 @@ namespace InterlockingMasonryLocalForces
             }
         }
 
-       
+        /// <summary>
+        ///  DEBUG 3 :  method to verify force projections match between individual and resultant calculations
+        /// </summary>
+        /// <summary>
+        /// Debug method to verify force projections match between individual and resultant calculations
+        /// </summary>
 
+
+
+        private void AnalyzeEquilibriumEquations(GRBModel model, GeometryModel geometry, ProblemData data)
+        {
+            if (model.SolCount == 0)
+            {
+                Console.WriteLine("No solution available for equilibrium analysis.");
+                return;
+            }
+
+            Console.WriteLine("\n=== MOMENT EQUILIBRIUM EQUATIONS ANALYSIS ===");
+
+            // Get non-support blocks in the same order as matrix construction
+            var nonSupportBlocks = geometry.Blocks.Values
+                .Where(b => b.Id > 0)
+                .OrderBy(b => b.Id)
+                .ToList();
+
+            double lambdaVal = lambda.X;
+            Console.WriteLine($"Current lambda value: {lambdaVal:F6}");
+
+            Console.WriteLine("\nMoment Equilibrium Check for each block:");
+            Console.WriteLine("Block | Row | Applied Moment | Gravity Moment | Force Moments | Total | Status");
+            Console.WriteLine("------|-----|----------------|----------------|---------------|-------|-------");
+
+            for (int blockIdx = 0; blockIdx < nonSupportBlocks.Count; blockIdx++)
+            {
+                var block = nonSupportBlocks[blockIdx];
+                int momentRow = blockIdx * 3 + 2; // Every 3rd row starting from 2
+
+                if (momentRow >= data.NumRows) continue;
+
+                // Get applied moment (B vector)
+                double appliedMoment = 0;
+                if (data.B != null && momentRow < data.B.Length)
+                {
+                    appliedMoment = data.B[momentRow] * lambdaVal;
+                }
+
+                // Get gravity moment (G vector)
+                double gravityMoment = 0;
+                if (data.G != null && momentRow < data.G.Length)
+                {
+                    gravityMoment = data.G[momentRow];
+                }
+
+                // Calculate moment from forces (A matrix * solution)
+                double forceMoments = 0;
+                for (int j = 0; j < data.NumCols; j++)
+                {
+                    double matrixCoeff = data.MatrixA[momentRow, j];
+                    double forceValue = fAll[j].X;
+                    forceMoments += matrixCoeff * forceValue;
+                }
+
+                // Check equilibrium: Force Moments - Gravity = Applied Moment
+                double total = forceMoments - gravityMoment;
+                double residual = Math.Abs(total - appliedMoment);
+                string status = residual < 1e-6 ? "OK" : "VIOLATION";
+
+                Console.WriteLine($"{block.Id,5} | {momentRow,3} | {appliedMoment,14:F6} | {gravityMoment,14:F6} | " +
+                                 $"{forceMoments,13:F6} | {total,5:F6} | {status}");
+
+                if (residual > 1e-6)
+                {
+                    Console.WriteLine($"      ⚠️  Equilibrium violation! Residual = {residual:E3}");
+                }
+            }
+        }
         /// Create 2 local variables (f_n, f_t) for each face-vertex pair,
         /// plus the load factor lambda.
         /// The matrix A is expected to have #cols = 2 * faceVertexPairs.Count.
@@ -965,7 +1039,6 @@ namespace InterlockingMasonryLocalForces
                     writer.WriteLine($"Could not retrieve lambda: {e.Message}");
                 }
 
-                // 2) Save local (f_n, f_t) for each face–vertex pair
                 // 2) Save local (f_n, f_t) for each face–vertex pair
                 writer.WriteLine("\n=== FaceID; Pt; fn; ft ===");
                 for (int j = 0; j < faceVertexPairs.Count; j++)
@@ -1785,8 +1858,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_pseudoparallel_friction_0e4.txt"   //data_pseudoparallel_friction_0e4
                 , geometry, data);
                 ComputeFaceNormalsFromGeometry(geometry);
-                // validate data
-                ValidateGeometryModel(geometry);
+
 
                 // Build equilibrium matrix programmatically
                 data.NumBlocks = geometry.Blocks.Values.Count(b => b.Id > 0); // Exclude supports
@@ -1958,8 +2030,6 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             // Validate VectorB and VectorG lengths
             int realBlocksCount = geometry.Blocks.Values.Count(b => b.Id > 0);
             int expectedRows = realBlocksCount * 3;
-            ValidateVectorLength(vectorB, expectedRows, "VectorB");
-            ValidateVectorLength(vectorG, expectedRows, "VectorG");
 
             data.B = vectorB.ToArray();
             data.G = vectorG.ToArray();
@@ -2133,129 +2203,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             }
         }
 
-        // Helper method to validate vector length
-        private static void ValidateVectorLength(List<double> vector, int expected, string name)
-        {
-            if (vector.Count != expected)
-                throw new InvalidDataException(
-                    $"{name} has {vector.Count} entries. Expected {expected} (3 per block)."
-                );
-        }
-        // helper method to check that order of vertices is correct
-        static void ValidateGeometryModel(GeometryModel geometry)
-        {
-            Console.WriteLine("\n=== GEOMETRY VALIDATION ===\n");
-
-            // 1. Check all normal and tangent vectors
-            Console.WriteLine("--- Vector Validation ---");
-            bool allVectorsValid = true;
-
-            foreach (var face in geometry.Faces.Values)
-            {
-                bool faceValid = true;
-                Console.Write($"Face {face.Id}: ");
-
-                // Check if vectors exist
-                if (face.Normal == null || face.Normal.Length != 2 ||
-                    face.Tangent == null || face.Tangent.Length != 2)
-                {
-                    Console.WriteLine("ERROR: Missing vectors");
-                    allVectorsValid = false;
-                    continue;
-                }
-
-                // Check normal vector length
-                double normalLength = Math.Sqrt(face.Normal[0] * face.Normal[0] + face.Normal[1] * face.Normal[1]);
-                bool normalLengthOk = Math.Abs(normalLength - 1.0) < 1e-6;
-                if (!normalLengthOk)
-                {
-                    Console.Write($"Normal not unit length ({normalLength:F6}) ");
-                    faceValid = false;
-                }
-
-                // Check tangent vector length
-                double tangentLength = Math.Sqrt(face.Tangent[0] * face.Tangent[0] + face.Tangent[1] * face.Tangent[1]);
-                bool tangentLengthOk = Math.Abs(tangentLength - 1.0) < 1e-6;
-                if (!tangentLengthOk)
-                {
-                    Console.Write($"Tangent not unit length ({tangentLength:F6}) ");
-                    faceValid = false;
-                }
-
-                // Check orthogonality
-                double dotProduct = face.Normal[0] * face.Tangent[0] + face.Normal[1] * face.Tangent[1];
-                bool orthogonalOk = Math.Abs(dotProduct) < 1e-6;
-                if (!orthogonalOk)
-                {
-                    Console.Write($"Not orthogonal (dot={dotProduct:F6}) ");
-                    faceValid = false;
-                }
-
-                if (faceValid)
-                    Console.WriteLine("OK");
-                else
-                    Console.WriteLine();
-
-                allVectorsValid &= faceValid;
-            }
-
-            // 2. Check vertex ordering consistency
-            Console.WriteLine("\n--- Vertex Ordering Validation ---");
-            bool allOrderingsConsistent = true;
-            double? expectedCrossSign = null;
-
-            foreach (var face in geometry.Faces.Values)
-            {
-                if (face.VertexIds.Count != 2)
-                {
-                    Console.WriteLine($"Face {face.Id}: SKIP (not exactly 2 vertices)");
-                    continue;
-                }
-
-                int v1Id = face.VertexIds[0];
-                int v2Id = face.VertexIds[1];
-
-                if (!geometry.Vertices.ContainsKey(v1Id) || !geometry.Vertices.ContainsKey(v2Id))
-                {
-                    Console.WriteLine($"Face {face.Id}: ERROR (missing vertices)");
-                    continue;
-                }
-
-                var v1 = geometry.Vertices[v1Id];
-                var v2 = geometry.Vertices[v2Id];
-
-                // Vector from v1 to v2
-                double dx = v2.X - v1.X;
-                double dy = v2.Y - v1.Y;
-
-                // Cross product with normal (should be consistent sign for all faces)
-                double cross = dx * face.Normal[1] - dy * face.Normal[0];
-
-                // If this is the first face, set the expected sign
-                if (!expectedCrossSign.HasValue && Math.Abs(cross) > 1e-6)
-                {
-                    expectedCrossSign = Math.Sign(cross);
-                }
-
-                string status = "OK";
-                if (expectedCrossSign.HasValue && Math.Sign(cross) != expectedCrossSign.Value)
-                {
-                    status = "INCONSISTENT ORDERING";
-                    allOrderingsConsistent = false;
-                }
-
-                Console.WriteLine($"Face {face.Id}: V{v1Id}→V{v2Id}, Cross={cross:F6}, {status}");
-            }
-
-            // Summary
-            Console.WriteLine("\n=== VALIDATION SUMMARY ===");
-            Console.WriteLine($"All vectors valid: {(allVectorsValid ? "YES" : "NO")}");
-            Console.WriteLine($"Consistent vertex ordering: {(allOrderingsConsistent ? "YES" : "NO")}");
-            Console.WriteLine("===============================\n");
-        }
-
-
-        
+ 
         
         // be informed if some input data is modified by the solver 
         static void LogDataModification(int lineNo, string message)
