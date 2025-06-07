@@ -13,6 +13,7 @@ using System.Runtime.Intrinsics.X86;
 using System.Xml.Linq;
 using System;
 using System.Net;
+using System.Threading.Channels;
 
 /*
 Mathematical programming model for masonry stability check.
@@ -20,20 +21,16 @@ Primary variables: fx[i], fy[i] (global forces at vertex i).
 Constraints: Block equilibrium, Vertex No-Tension, Vertex Friction, Face Strength/Eccentricity.
 Goal: Maximize load factor lambda.
 
-Input Files:
-1. Equilibrium Matrix File (*.txt): Contains MatrixA and base load vector B.
-   Format:
-   matrix_A_size
-   [n = rows = num_blocks * 3]
-   [p = cols = num_vertices * 2]
-   matrix_A_values
-   [n*p values...]
-   vector_B_values
-   [n values...]
-2. Face Geometry File (*.txt):
-   Format (per line):   faceID, length, thickness, cohesion, friction, vertex1, vertex2.normal x, normal y, tangent x, tangent y
-The VertexIds should be ordered consistently, such that when moving along the tangent 
-from the first vertex to the second vertex, the normal points from block j to block j+1.
+Input File:
+[Vertices]
+Header:[Blocks]
+Format (per line):  BlockID, CentroidX, CentroidY, AppliedFx, AppliedFy, x_coord (1), y_coord (1)
+Header:[Vertices]
+Format (per line):vertexID, x_coord, y_coord
+Header: [Faces]
+Format (per line): faceID, ID_block1, ID_block2, ID_pt1, ID_pt2, Thickness, Cohesion, friction coeff. 
+Header: [VectorG]
+   
        # lines are disregarded
 
 */
@@ -188,6 +185,12 @@ namespace InterlockingMasonryLocalForces
         public int Id { get; set; }
         public double CentroidX { get; set; }  // Centroid X
         public double CentroidY { get; set; }  // Centroid Y
+
+        // Applied loads
+        public double AppliedFx { get; set; } = 0.0;
+        public double AppliedFy { get; set; } = 0.0;
+        public double LoadApplicationX { get; set; } = 0.0;  // x coordin Where Fx AND Fy are applied
+        public double LoadApplicationY { get; set; } = 0.0;
     }
 
     /// A container for all geometry in the problem (faces, vertices, etc.).
@@ -489,14 +492,7 @@ namespace InterlockingMasonryLocalForces
         }
 
         /// <summary>
-        ///  DEBUG 3 :  method to verify force projections match between individual and resultant calculations
-        /// </summary>
-        /// <summary>
-        /// Debug method to verify force projections match between individual and resultant calculations
-        /// </summary>
-
-
-
+        ///  DEBUG 3 :  
         private void AnalyzeEquilibriumEquations(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             if (model.SolCount == 0)
@@ -566,7 +562,12 @@ namespace InterlockingMasonryLocalForces
         }
         /// Create 2 local variables (f_n, f_t) for each face-vertex pair,
         /// plus the load factor lambda.
-        /// The matrix A is expected to have #cols = 2 * faceVertexPairs.Count.
+        /// The matrix A is expected to have #cols = 2 * faceVertexPairs.Count. <summary>
+        /// Create 2 local variables (f_n, f_t) for each face-vertex pair,
+        /// </summary>
+        /// <param name="model"></param>
+        /// <param name="data"></param>
+       
         private void CreateVariables(GRBModel model, ProblemData data)
             {
                 int m = faceVertexPairs.Count; // number of pairs
@@ -596,7 +597,7 @@ namespace InterlockingMasonryLocalForces
 
             /// A * fAll - G = B * lambda
             /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
-            private void AddEquilibriumConstraints(GRBModel model, ProblemData data)
+         private void AddEquilibriumConstraints(GRBModel model, ProblemData data)
             {
                 int n = data.NumRows;
                 int p = data.NumCols;  // should match fAll.Length
@@ -622,16 +623,15 @@ namespace InterlockingMasonryLocalForces
                 // Subtract the gravity portion G[i]
                 if (data.G != null && i < data.G.Length)
                     lhs.AddConstant(-data.G[i]);
-                // Right side: B[i] * lambda
-                GRBLinExpr rhs = 0.0;
-                if (data.B != null && i < data.B.Length)
-                    rhs.AddTerm(data.B[i], lambda);
 
-                model.AddConstr(lhs == rhs, $"Equil_{i}");
+                // Subtract B[i] * lambda (moved to left side)
+                if (data.B != null && i < data.B.Length)
+                    lhs.AddTerm(data.B[i], lambda);
+
+                // Equilibrium: A*fAll - G - B*lambda = 0
+                model.AddConstr(lhs == 0.0, $"Equil_{i}");
                 }
             }
-
-
 
 
         // vertex based friction limit
@@ -744,11 +744,6 @@ namespace InterlockingMasonryLocalForces
             }
           */
 
- 
-
-
-
-
 
         /// <summary>
         /// //// MethodBendingAndCompression claude around midpoint
@@ -856,113 +851,6 @@ namespace InterlockingMasonryLocalForces
             }
         }
 
-
-
-        // MethodBendingAndCompression around v1
-        /*
-        private void AddFaceEccConstraintsAroundV1(GRBModel model, GeometryModel geometry, ProblemData data)
-        {
-            double sigmaC = data.SigmaC;
-
-            Console.WriteLine("\n--- Face Eccentricity Constraints (Moment about v1) ---");
-
-            foreach (var fKvp in geometry.Faces)
-            {
-                Face face = fKvp.Value;
-                // We assume each face in 2D has exactly 2 vertices.
-                if (face.VertexIds.Count != 2) continue;
-
-                // Get vertex IDs
-                int vertexId1 = face.VertexIds[0];
-                int vertexId2 = face.VertexIds[1];
-
-                // Get vertex coordinates
-                ContactPoint vertex1 = _geometry.Vertices[vertexId1];
-                ContactPoint vertex2 = _geometry.Vertices[vertexId2];
-
-                // Get pair indices (for normal forces)
-                int idx1 = GetPairIndex(face.Id, vertexId1);
-                int idx2 = GetPairIndex(face.Id, vertexId2);
-
-                if (idx1 < 0 || idx2 < 0)
-                {
-                    Console.WriteLine($"Skipping ecc constraints for Face {face.Id}.");
-                    continue;
-                }
-
-                // Local normal vars at v1 & v2
-                GRBVar fn1 = fAll[2 * idx1];   // normal at (face, v1)
-                GRBVar fn2 = fAll[2 * idx2];   // normal at (face, v2)
-
-                // 1) fnk = fn1 + fn2
-                // GRBVar fnk = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");// a problem in quadratic
-                double realisticMaxForce = sigmaC * face.Length * face.Thickness;  // Physical limit
-                GRBVar fnk = model.AddVar(0.0, realisticMaxForce, 0.0, GRB.CONTINUOUS, $"fnk_face{face.Id}");  // GOOD: Realistic bound
-                {
-                    GRBLinExpr sumExpr = new GRBLinExpr();
-                    sumExpr.AddTerm(1.0, fn1);
-                    sumExpr.AddTerm(1.0, fn2);
-                    model.AddConstr(fnk == sumExpr, $"Def_fnk_face{face.Id}");
-                }
-
-                // 2) Distance from v1 to v2 (Lk). 
-                //    We'll just use the Euclidean distance so that Lk > 0.
-                //    If it's purely horizontal or vertical, this is still fine.
-                double dx = vertex2.X - vertex1.X;
-                double dy = vertex2.Y - vertex1.Y;
-                double Lk = Math.Sqrt(dx * dx + dy * dy);
-
-                // 3) Eccentricity from v1 (call it eK), bounding it from 0 to Lk 
-                //    if we want no tension at either edge. 
-                //    If you might allow partial tension, you could do a wider range: 
-                //    e.g. eK in [-0.5*Lk, 1.5*Lk], etc.
-                GRBVar eK = model.AddVar(0.0, Lk, 0.0, GRB.CONTINUOUS, $"eK_face{face.Id}");
-
-                faceEccVars[face.Id] = eK;  //  Keep a reference for debugging
-
-                // 4) "Moment about v1":  fnk * eK = fn2 * Lk
-                //    i.e. the total normal force times its lever arm about v1 
-                //    must match what fn2 * Lk alone would produce at v2.
-                {
-                    GRBQuadExpr mq = new GRBQuadExpr();
-                    //   +1 * (fnk * eK)
-                    mq.AddTerm(1.0, fnk, eK);
-                    //   - Lk * fn2
-                    mq.AddTerm(-Lk, fn2);
-
-                    model.AddQConstr(mq == 0.0, $"MomentEq_face{face.Id}");
-                }
-
-                // 5) If sigmaC > 0, add compressive/bending strength constraints.
-                double t_k = face.Thickness;
-                if (sigmaC > 1e-9 && t_k > 1e-9)
-                {
-                    // denom = 2 * sigmaC * thickness
-                    double denom = 2.0 * sigmaC * t_k;
-
-                    // (a)  eK + fnk / denom <= Lk
-                    {
-                        GRBLinExpr lhsUp = 0.0;
-                        lhsUp.AddTerm(1.0, eK);
-                        lhsUp.AddTerm(1.0 / denom, fnk);
-                        model.AddConstr(lhsUp <= Lk, $"StrengthUp_face{face.Id}");
-                    }
-
-                    // (b)  eK - fnk / denom >= 0
-                    {
-                        GRBLinExpr lhsLo = 0.0;
-                        lhsLo.AddTerm(1.0, eK);
-                        lhsLo.AddTerm(-1.0 / denom, fnk);
-                        model.AddConstr(lhsLo >= 0.0, $"StrengthLo_face{face.Id}");
-                    }
-                }
-            }
-        }
-        */
-
-
-        /// <summary>
-
         ///  printing the solution
         private void PrintSolution(GRBModel model)
         {
@@ -992,8 +880,6 @@ namespace InterlockingMasonryLocalForces
             // Sometimes turning off presolve helps to distinguish infeasible from unbounded
             model.Parameters.Presolve = 0;
             model.Optimize();
-
-
 
                 if (model.Status == 3)
               {
@@ -1141,7 +1027,7 @@ namespace InterlockingMasonryLocalForces
 
                     // If usage is near 1.0, you're "on" the friction limit
                     string shearStatus;
-                    double usageTolerance = 0.98;  // or pick something else like 0.99
+                    double usageTolerance = 0.995;  // or pick something else like 0.99
                     if (usageShear >= usageTolerance)
                         shearStatus = "CRITICAL";
                     else
@@ -1187,7 +1073,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                     double usageBC = (actualStress + tiny) / (sigmaC + tiny);
 
                     // Status determination
-                    double usageTolerance = 0.98;
+                    double usageTolerance = 0.995;
                     string eccStatus = (usageBC >= usageTolerance) ? "CRITICAL" : "OK";
 
                     // SHORTENED OUTPUT - only essential information
@@ -1244,6 +1130,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 }
             }
         }
+
     } //end public class LocalOptimizer
 
 
@@ -1855,8 +1742,9 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_pseudoparallel_friction_0e4.txt"   //data_pseudoparallel_friction_0e4
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_cairo_friction_0e05.txt"   //data_pseudoparallel_friction_0e4
                 , geometry, data);
+                DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
 
 
@@ -1907,10 +1795,139 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
         }  // end of Main
 
 
-        static void LoadAllData(string filePath, GeometryModel geometry, ProblemData data)
+        // Method to automatically construct B vector from block load data
+        private static double[] ConstructBVectorFromBlocks(GeometryModel geometry)
+        {
+            var nonSupportBlocks = geometry.Blocks.Values
+                .Where(b => b.Id > 0)
+                .OrderBy(b => b.Id)
+                .ToList();
+
+            int numRows = nonSupportBlocks.Count * 3;
+            double[] vectorB = new double[numRows];
+
+            Console.WriteLine("\n=== AUTOMATIC B VECTOR CONSTRUCTION ===");
+            Console.WriteLine("Block | Fx Applied | Fy Applied | Load Point | Centroid | Computed Moment");
+            Console.WriteLine("------|------------|------------|------------|----------|----------------");
+
+            for (int blockIdx = 0; blockIdx < nonSupportBlocks.Count; blockIdx++)
+            {
+                var block = nonSupportBlocks[blockIdx];
+
+                int fxRow = blockIdx * 3;
+                int fyRow = blockIdx * 3 + 1;
+                int momentRow = blockIdx * 3 + 2;
+
+                // Direct force assignments
+                vectorB[fxRow] = block.AppliedFx;
+                vectorB[fyRow] = block.AppliedFy;
+
+                // Compute moment around centroid due to forces applied at LoadApplication point
+                // Moment = Fy * (Px - Cx) + Fx * (Cy - Py)
+                // This follows the right-hand rule convention
+                double momentArm_x = block.LoadApplicationX - block.CentroidX;
+                double momentArm_y = block.CentroidY - block.LoadApplicationY;
+
+                double computedMoment = block.AppliedFy * momentArm_x + block.AppliedFx * momentArm_y;
+                vectorB[momentRow] = computedMoment;
+
+                // Display for verification
+                string loadPoint = $"({block.LoadApplicationX:F2},{block.LoadApplicationY:F2})";
+                string centroid = $"({block.CentroidX:F2},{block.CentroidY:F2})";
+
+                Console.WriteLine($"{block.Id,5} | {block.AppliedFx,10:F3} | {block.AppliedFy,10:F3} | " +
+                                 $"{loadPoint,10} | {centroid,8} | {computedMoment,15:F6}");
+
+                // Show moment calculation breakdown if forces exist
+                if (Math.Abs(block.AppliedFx) > 1e-6 || Math.Abs(block.AppliedFy) > 1e-6)
+                {
+                    Console.WriteLine($"      Moment calculation: " +
+                                     $"Fy*({block.LoadApplicationX:F2}-{block.CentroidX:F2}) + " +
+                                     $"Fx*({block.CentroidY:F2}-{block.LoadApplicationY:F2}) = " +
+                                     $"{block.AppliedFy:F3}*{momentArm_x:F3} + {block.AppliedFx:F3}*{momentArm_y:F3} = {computedMoment:F6}");
+                }
+            }
+
+            Console.WriteLine($"\nGenerated B vector with {numRows} entries (3 per block)");
+            return vectorB;
+        }
+
+        private static void DisplayBVector(ProblemData data, GeometryModel geometry)
+        {
+            if (data.B == null || data.B.Length == 0)
+            {
+                Console.WriteLine("B vector is null or empty!");
+                return;
+            }
+
+            Console.WriteLine("\n=== B VECTOR CONTENTS ===");
+            Console.WriteLine($"Total length: {data.B.Length}");
+
+            // Get non-support blocks for mapping
+            var nonSupportBlocks = geometry.Blocks.Values
+                .Where(b => b.Id > 0)
+                .OrderBy(b => b.Id)
+                .ToList();
+
+            Console.WriteLine($"Expected length: {nonSupportBlocks.Count * 3} (3 equations per block)");
+
+            if (data.B.Length != nonSupportBlocks.Count * 3)
+            {
+                Console.WriteLine("⚠️  WARNING: B vector length doesn't match expected length!");
+            }
+
+            // Display header
+            Console.WriteLine("\nRow | Block | Equation |    B Value    | Description");
+            Console.WriteLine("----|-------|----------|---------------|------------------");
+
+            for (int i = 0; i < data.B.Length; i++)
+            {
+                int blockIndex = i / 3;
+                int equationType = i % 3;
+
+                string blockId = "?";
+                string eqName = "";
+                string description = "";
+
+                if (blockIndex < nonSupportBlocks.Count)
+                {
+                    var block = nonSupportBlocks[blockIndex];
+                    blockId = block.Id.ToString();
+
+                    switch (equationType)
+                    {
+                        case 0:
+                            eqName = "Fx";
+                            description = $"Applied Fx = {block.AppliedFx:F3}";
+                            break;
+                        case 1:
+                            eqName = "Fy";
+                            description = $"Applied Fy = {block.AppliedFy:F3}";
+                            break;
+                        case 2:
+                            eqName = "Mom";
+                            double momentArm_x = block.LoadApplicationX - block.CentroidX;
+                            double momentArm_y = block.CentroidY - block.LoadApplicationY;
+                            double expectedMoment = block.AppliedFy * momentArm_x + block.AppliedFx * momentArm_y;
+                            description = $"Computed = {expectedMoment:F6}";
+                            break;
+                    }
+                }
+                else
+                {
+                    eqName = "???";
+                    description = "Block index out of range";
+                }
+
+                Console.WriteLine($"{i,3} | {blockId,5} | {eqName,8} | {data.B[i],13:F6} | {description}");
+            }
+        }
+
+
+
+            static void LoadAllData(string filePath, GeometryModel geometry, ProblemData data)
         {
             string currentSection = "";
-            var vectorB = new List<double>();
             var vectorG = new List<double>();
             int lineNo = 0;
 
@@ -1930,18 +1947,47 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                     case "[Blocks]":
                         if (trimmedLine.StartsWith("BlockID")) continue; // Skip header
                         var blockParts = trimmedLine.Split(',');
-                        //int blockId = int.Parse(blockParts[0]);
+
                         if (!int.TryParse(blockParts[0], out int blockId))
                         {
                             Console.WriteLine($"Line {lineNo}: Invalid BlockID '{blockParts[0]}'. Skipping block.");
                             continue;
                         }
-                        geometry.Blocks.Add(blockId, new Block
+
+                        // Parse enhanced block data: ID, CentroidX, CentroidY, AppliedFx, AppliedFy, LoadAppX, LoadAppY
+                        Block block = new Block
                         {
                             Id = blockId,
                             CentroidX = double.Parse(blockParts[1]),
                             CentroidY = double.Parse(blockParts[2])
-                        });
+                        };
+
+                        // Check if load data is provided (optional - default to zero loads at centroid)
+                        if (blockParts.Length >= 7)
+                        {
+                            block.AppliedFx = double.Parse(blockParts[3]);
+                            block.AppliedFy = double.Parse(blockParts[4]);
+                            block.LoadApplicationX = double.Parse(blockParts[5]);
+                            block.LoadApplicationY = double.Parse(blockParts[6]);
+                        }
+                        else if (blockParts.Length >= 5)
+                        {
+                            // Only forces provided, assume applied at centroid
+                            block.AppliedFx = double.Parse(blockParts[3]);
+                            block.AppliedFy = double.Parse(blockParts[4]);
+                            block.LoadApplicationX = block.CentroidX;
+                            block.LoadApplicationY = block.CentroidY;
+                        }
+                        else
+                        {
+                            // No load data, assume no applied loads
+                            block.AppliedFx = 0.0;
+                            block.AppliedFy = 0.0;
+                            block.LoadApplicationX = block.CentroidX;
+                            block.LoadApplicationY = block.CentroidY;
+                        }
+
+                        geometry.Blocks.Add(blockId, block);
                         break;
 
                     case "[Vertices]":
@@ -2018,41 +2064,28 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                         geometry.Faces.Add(face.Id, face);
                         break;
 
-                    case "[VectorB]":
-                        vectorB.AddRange(ParseLoadLine(trimmedLine, "VectorB", lineNo));
-                        break;
-
                     case "[VectorG]":
                         vectorG.AddRange(ParseLoadLine(trimmedLine, "VectorG", lineNo));
                         break;
                 }
             }
+
+            data.B = ConstructBVectorFromBlocks(geometry);
+            data.G = vectorG.ToArray();
+
             // Validate VectorB and VectorG lengths
             int realBlocksCount = geometry.Blocks.Values.Count(b => b.Id > 0);
             int expectedRows = realBlocksCount * 3;
 
-            data.B = vectorB.ToArray();
-            data.G = vectorG.ToArray();
+            if (data.B.Length != expectedRows)
+                throw new InvalidDataException($"Generated B vector has {data.B.Length} entries, expected {expectedRows}");
 
-            // Output the final counts for verification
-            Console.WriteLine($"Loaded {geometry.Blocks.Count} blocks.");
-            Console.WriteLine($"Loaded {geometry.Vertices.Count} vertices.");
-            Console.WriteLine($"Loaded {geometry.Faces.Count} faces.");
-            Console.WriteLine($"Loaded {data.B.Length} entries for VectorB."); // Optional: verify vector lengths
-            Console.WriteLine($"Loaded {data.G.Length} entries for VectorG.");
+            //ValidateVectorLength(vectorG, expectedRows, "VectorG");
 
-            // Cross-check expected #variables = #face-vertex pairs * 2
-            int totalFaceVertexPairs = geometry.Faces.Values.Sum(f => f.VertexIds.Count);
-            int expectedNumVariables = totalFaceVertexPairs * 2;
-            data.ExpectedNumVariables = expectedNumVariables;
-            Console.WriteLine($"Expected #variables = {expectedNumVariables} (from {totalFaceVertexPairs} face-vertex pairs)");
-
-            // Optional cross-check: does #faces match half the #vertices? (just a heuristic)
-            int expectedNumFacesFromVertices = geometry.Vertices.Count / 2;
-            if (geometry.Faces.Count != expectedNumFacesFromVertices)
-            {
-                Console.WriteLine($"Warning: #faces ({geometry.Faces.Count}) != #vertices/2 ({expectedNumFacesFromVertices}). Check data.");
-            }
+            Console.WriteLine($"✓ Automatically generated B vector with {data.B.Length} entries");
+            Console.WriteLine($"✓ Loaded {geometry.Blocks.Count} blocks with load information");
+            Console.WriteLine($"✓ Loaded {geometry.Vertices.Count} vertices");
+            Console.WriteLine($"✓ Loaded {geometry.Faces.Count} faces");
         }
         private static double DistanceBetween(ContactPoint a, ContactPoint b)
         {
