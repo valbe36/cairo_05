@@ -1027,7 +1027,7 @@ namespace InterlockingMasonryLocalForces
 
                     // If usage is near 1.0, you're "on" the friction limit
                     string shearStatus;
-                    double usageTolerance = 0.98;  // or pick something else like 0.99
+                    double usageTolerance = 0.995;  // or pick something else like 0.99
                     if (usageShear >= usageTolerance)
                         shearStatus = "CRITICAL";
                     else
@@ -1073,7 +1073,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                     double usageBC = (actualStress + tiny) / (sigmaC + tiny);
 
                     // Status determination
-                    double usageTolerance = 0.98;
+                    double usageTolerance = 0.995;
                     string eccStatus = (usageBC >= usageTolerance) ? "CRITICAL" : "OK";
 
                     // SHORTENED OUTPUT - only essential information
@@ -1742,7 +1742,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_pseudoparallel_friction_0e4.txt"   //data_pseudoparallel_friction_0e4
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_cairo_friction_0e05.txt"   //data_pseudoparallel_friction_0e4
                 , geometry, data);
                 DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
