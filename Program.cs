@@ -330,7 +330,8 @@ namespace InterlockingMasonryLocalForces
 
                     // 6)   Add face eccentricity constraints 
             
-                    AddBiaxialBending(model, geometry, data);
+                    AddBiaxialBendingConstraints(model, geometry, data);
+                    AnalyzeBiaxialBendingConstraints(model, geometry, data);
                     // AddFaceMidpointBendingConstraints(model, geometry, data);
 
                     // 7) Objective: maximize lambda
@@ -805,7 +806,7 @@ namespace InterlockingMasonryLocalForces
         /// <summary>
         /// Analyze biaxial results after optimization
         /// </summary>
-        private void AddBiaxialBendingConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
+        private void AnalyzeBiaxialBendingConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             if (model.SolCount == 0) return;
 
@@ -828,7 +829,7 @@ namespace InterlockingMasonryLocalForces
 
                 Face face = _geometry.Faces[faceId];
                 double A_eff = L1_eff * L2_eff * face.Thickness;
-                double maxForce = Data.SigmaC * A_eff;
+                double maxForce = data.SigmaC * A_eff;
                 double usage = fnTotal / (maxForce + 1e-12);
 
                 Console.WriteLine($"{faceId,4} | {fnTotal,7:F1} | {e1,6:F3} | {e2,6:F3} | " +
