@@ -320,7 +320,7 @@ namespace InterlockingMasonryLocalForces
                     model.Parameters.PreQLinearize = 0;     // Don't linearize quadratic terms
 
                     // model.Parameters.MIPGap = 0.0005;
-                    // model.Parameters.TimeLimit = 100; // Limit to 60 seconds
+                    model.Parameters.TimeLimit = 1000; // Limit to 600 seconds
                     //model.Parameters.Quad = 1;       // Convex quadratic relaxation
             
 
@@ -1742,7 +1742,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/stepped_friction_0e4.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/stepped_friction_0e2.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
                 , geometry, data);
                 DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
