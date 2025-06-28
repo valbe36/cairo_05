@@ -1,4 +1,4 @@
-
+﻿
 #!/usr/bin/env python3
 """
 Interface Resultant Analyzer for Masonry Structures
@@ -302,7 +302,7 @@ class InterfaceAnalyzer:
         print(f"\nFound {len(interfaces)} interfaces to analyze:")
         
         for block_a, block_b in interfaces:
-            print(f"  Analyzing interface {block_a} ? {block_b}")
+            print(f"  Analyzing interface {block_a} ↔ {block_b}")
             try:
                 result = self.analyze_interface(block_a, block_b)
                 results.append(result)
@@ -352,7 +352,7 @@ class InterfaceAnalyzer:
         print("-" * 80)
         
         for r in results:
-            interface_name = f"{r.block_a}?{r.block_b}"
+            interface_name = f"{r.block_a}↔{r.block_b}"
             print(f"{interface_name:<12} {r.resultant_fx:<10.1f} {r.resultant_fy:<10.1f} "
                   f"{r.resultant_magnitude:<10.1f} {r.moment_z:<12.3f} {r.eccentricity:<10.4f}")
 
