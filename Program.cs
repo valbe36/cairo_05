@@ -1085,7 +1085,8 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 }
 
                 //7 save used tangents and vectors with both vertices
-                writer.WriteLine("\n--- Face ID, Pt1, Pt2, Normal, Tangent,  ---");
+                //7 save used tangents and vectors with both vertices AND BLOCK CONNECTIVITY
+                writer.WriteLine("\n--- Face ID, BlockJ, BlockK, Pt1, Pt2, Normal, Tangent ---");
                 foreach (var fEntry in _geometry.Faces)
                 {
                     int faceId = fEntry.Key;
@@ -1119,14 +1120,16 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                         }
                     }
 
-                    // Print everything in one line
+                    // Print everything in one line INCLUDING BLOCK CONNECTIVITY
                     writer.WriteLine(
                         $"{faceId};" +
+                        $"{face.BlockJ};" +           // ← NEW: BlockJ
+                        $"{face.BlockK};" +           // ← NEW: BlockK  
                         $"{v1X:F3},{v1Y:F3},0; " +
                         $"{v2X:F3},{v2Y:F3},0; " +
                         $"{nx:F3},{ny:F3}; " +
                         $"{tx:F3},{ty:F3}"
-                    );
+                         );
                 }
             }
         }
