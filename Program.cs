@@ -327,10 +327,11 @@ namespace InterlockingMasonryLocalForces
                     model.Parameters.Crossover = 0;         // Disable crossover
                     model.Parameters.PreQLinearize = 0;     // Don't linearize quadratic terms
 
-                    // model.Parameters.MIPGap = 0.0005;
-                    model.Parameters.TimeLimit = 1000; // Limit to 600 seconds
+                    // model.Parameters.MIPGap = 0.005;// Stop at 0.5% gap 
+                    // incumbent: best feasible solution // upper: max real value of current feasible
+                    // model.Parameters.TimeLimit = 1000; // Limit to 600 seconds
                     //model.Parameters.Quad = 1;       // Convex quadratic relaxation
-            
+
 
                     // 8) Solve
                     model.Optimize();
@@ -344,7 +345,7 @@ namespace InterlockingMasonryLocalForces
                     }
 
 
-                    SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt", data);
+                    SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairobis.txt", data);
                     // 10) Print solution
                     PrintSolution(model);
                     }
@@ -760,7 +761,7 @@ namespace InterlockingMasonryLocalForces
         {
             double sigmaC = data.SigmaC;
 
-            Console.WriteLine("\n--- Midpoint-Based Eccentricity Constraints ---");
+ 
 
             foreach (var fKvp in geometry.Faces)
             {
@@ -853,8 +854,6 @@ namespace InterlockingMasonryLocalForces
                         lhs2.AddTerm(-2.0 * sigma_t, e);  // Note the negative sign
                         model.AddConstr(lhs2 <= sigma_t * L, $"StrengthNeg_face{face.Id}");
                     }
-
-                    Console.WriteLine($"Face {face.Id}: e ∈ [-{L / 2.0:F3}, +{L / 2.0:F3}], max_force = {maxNormalForce:F1}");
                 }
             }
         }
@@ -1282,20 +1281,12 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 int tangentialColIdx = 2 * pairIdx + 1; // f_t column
                 var pair = faceVertexPairs[pairIdx];
 
-                Console.WriteLine($"\nPair {pairIdx} (Face {pair.FaceId}, Vertex {pair.VertexId}):");
-
                 // Get the face to access normal/tangent vectors
                 if (geometry.Faces.TryGetValue(pair.FaceId, out Face face))
                 {
-                    Console.WriteLine($"  Face normal: ({face.Normal[0]:F6}, {face.Normal[1]:F6})");
-                    Console.WriteLine($"  Face tangent: ({face.Tangent[0]:F6}, {face.Tangent[1]:F6})");
-
                     // Verify unit vectors
                     double nMag = Math.Sqrt(face.Normal[0] * face.Normal[0] + face.Normal[1] * face.Normal[1]);
                     double tMag = Math.Sqrt(face.Tangent[0] * face.Tangent[0] + face.Tangent[1] * face.Tangent[1]);
-
-                    Console.WriteLine($"  Normal magnitude: {nMag:F6}");
-                    Console.WriteLine($"  Tangent magnitude: {tMag:F6}");
 
                     if (Math.Abs(nMag - 1.0) > 0.01)
                         Console.WriteLine($"  WARNING: Normal vector is not unit length!");
@@ -1763,7 +1754,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_stepped_friction_0e4.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_stepped_friction_0e4bis.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
                 , geometry, data);
                 DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
@@ -1827,9 +1818,6 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             int numRows = nonSupportBlocks.Count * 3;
             double[] vectorB = new double[numRows];
 
-            Console.WriteLine("\n=== AUTOMATIC B VECTOR CONSTRUCTION ===");
-            Console.WriteLine("Block | Fx Applied | Fy Applied | Load Point | Centroid | Computed Moment");
-            Console.WriteLine("------|------------|------------|------------|----------|----------------");
 
             for (int blockIdx = 0; blockIdx < nonSupportBlocks.Count; blockIdx++)
             {
