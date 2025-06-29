@@ -2203,6 +2203,8 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 bool needSwap = false;
                 const double eps = 1e-12;
 
+                int blockSwaps = 0, vertexSwaps = 0;
+
                 // Compare centroidX
                 if (Math.Abs(jRef.CentroidX - kRef.CentroidX) < eps)
                 {
@@ -2222,6 +2224,15 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                     face.BlockJ = kId;
                     face.BlockK = jId;
                 }
+               
+                //check ordering
+                if (needSwap)
+                {
+                    blockSwaps++;
+                    Console.WriteLine($"Face {face.Id}: Swapping blocks {jId}↔{kId}");
+                }
+
+
 
                 // Now re-fetch references after potential swap
                 jRef = geometry.Blocks[face.BlockJ];
@@ -2252,6 +2263,10 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 // If cross < 0 => swap v1,v2 so that cross >= 0.
                 double crossCheck = dx12 * dCy - dy12 * dCx;
                 if (crossCheck < 0.0)
+                {
+                    vertexSwaps++;
+                    Console.WriteLine($"Face {face.Id}: Swapping vertices {v1Id}↔{v2Id}");
+                }
                 {
                     // Swap the vertex IDs
                     face.VertexIds[0] = v2Id;
@@ -2296,6 +2311,8 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 // Step 6: assign final results
                 face.Tangent = new double[] { tx, ty };
                 face.Normal = new double[] { nx, ny };
+
+                Console.WriteLine($"Total modifications: {blockSwaps} block swaps, {vertexSwaps} vertex swaps out of {geometry.Faces.Count} faces");
             }
         }
 
