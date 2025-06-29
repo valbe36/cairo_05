@@ -4,7 +4,7 @@ Interface Resultant Analyzer for Masonry Structures
 Computes resultant forces and eccentricities across block interfaces
 
 USAGE:
-1. Update the file paths in the main() function (lines ~220-222)
+1. Update the file paths in the main() function
 2. Run: python interface_analyzer.py
 3. Results saved to interface_resultants.csv
 
@@ -98,19 +98,6 @@ class MegaBlockInterfaceResultant:
     eccentricity: float
     application_point: Tuple[float, float]
     num_virtual_interfaces: int
-    """Resultant force and properties for an interface"""
-    block_a: int
-    block_b: int
-    centroid: Tuple[float, float]
-    virtual_face_length: float
-    tangent: Tuple[float, float]      # Virtual face tangent direction
-    normal: Tuple[float, float]       # Virtual face normal direction
-    resultant_fx: float               # Global X force
-    resultant_fy: float               # Global Y force
-    resultant_magnitude: float
-    moment_z: float                   # Moment about centroid
-    eccentricity: float               # Distance from centroid
-    application_point: Tuple[float, float]  # Where resultant acts
 
 class InterfaceAnalyzer:
     """Main analyzer class"""
@@ -118,8 +105,8 @@ class InterfaceAnalyzer:
     def __init__(self):
         self.face_forces: List[FaceForce] = []
         self.face_geometries: Dict[int, FaceGeometry] = {}
-        self.mega_blocks: Dict[int, MegaBlock] = {}  # NEW: MegaBlock mapping
-        self.mega_interfaces: Dict[Tuple[int, int], List[int]] = {}  # NEW: (megaA, megaB) -> [face_ids]
+        self.mega_blocks: Dict[int, MegaBlock] = {}
+        self.mega_interfaces: Dict[Tuple[int, int], List[int]] = {}
     
     def parse_results_file(self, filepath: str) -> None:
         """Parse the results file to extract face forces and geometry"""
@@ -254,7 +241,7 @@ class InterfaceAnalyzer:
     def _parse_mega_blocks(self, content: str) -> None:
         """Parse the --- MegaBlock ID, Virtual Block IDs --- section"""
         # Find the mega blocks section (optional)
-        pattern = r'--- MegaBlock ID, Virtual Block IDs ---\s*\n(.*?)(?=\Z)'
+        pattern = r'--- MegaBlock ID, Virtual Block IDs ---\s*\n(.*?)(?=\n---|\Z)'
         match = re.search(pattern, content, re.DOTALL)
         
         if not match:
@@ -318,9 +305,9 @@ class InterfaceAnalyzer:
                 continue
     
     def _parse_mega_interfaces(self, content: str) -> None:
-        """Parse the [MegaBlockInterfaces] section"""
+        """Parse the --- MegaBlockA, MegaBlockB, Face IDs --- section"""
         # Find the mega block interfaces section (optional)
-        pattern = r'\[MegaBlockInterfaces\]\s*\n(.*?)(?=\n\[|\Z)'
+        pattern = r'--- MegaBlockA, MegaBlockB, Face IDs ---\s*\n(.*?)(?=\n---|\Z)'
         match = re.search(pattern, content, re.DOTALL)
         
         if not match:
@@ -334,10 +321,6 @@ class InterfaceAnalyzer:
         print(f"DEBUG: Found {len(lines)} mega block interface definitions")
         
         for line_num, line in enumerate(lines):
-            # Skip header line
-            if 'MegaBlockA' in line and 'MegaBlockB' in line:
-                continue
-                
             print(f"DEBUG: Processing mega interface line {line_num}: '{line}'")
             
             # Parse: megaBlockA,megaBlockB,faceId1,faceId2,faceId3,...
@@ -457,125 +440,6 @@ class InterfaceAnalyzer:
         print(f"DEBUG: Created {interfaces_created} mega interface connections")
         return result
     
-    def analyze_mega_interface(self, mega_a: int, mega_b: int) -> MegaBlockInterfaceResultant:
-        """Analyze interface between two mega blocks"""
-        virtual_to_mega = self.get_virtual_to_mega_mapping()
-        
-        # Find all virtual interfaces that contribute to this mega interface
-        virtual_interfaces = []
-        interface_faces = []
-        
-        for geom in self.face_geometries.values():
-            if geom.block_j > 0 and geom.block_k > 0:
-                mega_j = virtual_to_mega.get(geom.block_j)
-                mega_k = virtual_to_mega.get(geom.block_k)
-                
-                if ((mega_j == mega_a and mega_k == mega_b) or 
-                    (mega_j == mega_b and mega_k == mega_a)):
-                    virtual_interfaces.append((geom.block_j, geom.block_k))
-                    interface_faces.append(geom)
-        
-        if not interface_faces:
-            raise ValueError(f"No interface found between mega blocks {mega_a} and {mega_b}")
-        
-        print(f"DEBUG: Mega interface {mega_a}↔{mega_b} contains {len(virtual_interfaces)} virtual interfaces")
-        
-        # Collect all vertices from all interface faces
-        all_vertices = []
-        for face in interface_faces:
-            all_vertices.extend([face.pt1[:2], face.pt2[:2]])
-        
-        # Remove duplicates and calculate centroid
-        unique_vertices = list(set(all_vertices))
-        centroid_x = sum(v[0] for v in unique_vertices) / len(unique_vertices)
-        centroid_y = sum(v[1] for v in unique_vertices) / len(unique_vertices)
-        centroid = (centroid_x, centroid_y)
-        
-        # Find overall orientation (longest combined span)
-        min_x = min(v[0] for v in unique_vertices)
-        max_x = max(v[0] for v in unique_vertices)
-        min_y = min(v[1] for v in unique_vertices)
-        max_y = max(v[1] for v in unique_vertices)
-        
-        span_x = max_x - min_x
-        span_y = max_y - min_y
-        
-        if span_x > span_y:
-            virtual_tangent = (1, 0)  # Horizontal
-            virtual_length = span_x
-        else:
-            virtual_tangent = (0, 1)  # Vertical
-            virtual_length = span_y
-        
-        virtual_normal = (-virtual_tangent[1], virtual_tangent[0])
-        
-        # Sum forces from all contributing faces
-        total_fx = 0.0
-        total_fy = 0.0
-        total_moment = 0.0
-        
-        for face in interface_faces:
-            # Determine which mega block this force acts on
-            mega_j = virtual_to_mega.get(face.block_j)
-            mega_k = virtual_to_mega.get(face.block_k)
-            
-            # Get all forces for this face
-            face_forces = [f for f in self.face_forces if f.face_id == face.face_id]
-            
-            for force in face_forces:
-                # Force acts on mega_b, determine sign
-                if mega_k == mega_b:
-                    sign = 1.0
-                else:
-                    sign = -1.0
-                
-                # Global force components
-                fx = sign * (force.fn * face.normal[0] + force.ft * face.tangent[0])
-                fy = sign * (force.fn * face.normal[1] + force.ft * face.tangent[1])
-                
-                total_fx += fx
-                total_fy += fy
-                
-                # Moment about centroid
-                dx = force.point[0] - centroid[0]
-                dy = force.point[1] - centroid[1]
-                moment = fx * dy - fy * dx
-                total_moment += moment
-        
-        # Calculate resultant properties
-        resultant_magnitude = math.sqrt(total_fx**2 + total_fy**2)
-        
-        # Eccentricity and application point
-        if abs(total_fx) > 1e-12 or abs(total_fy) > 1e-12:
-            eccentricity = abs(total_moment) / (resultant_magnitude + 1e-12)
-            
-            if abs(total_fx) > 1e-12:
-                app_x = centroid[0] + total_moment / total_fx
-                app_y = centroid[1]
-            else:
-                app_x = centroid[0]
-                app_y = centroid[1] + total_moment / (total_fy + 1e-12)
-        else:
-            eccentricity = float('inf')
-            app_x, app_y = centroid
-        
-        return MegaBlockInterfaceResultant(
-            mega_block_a=mega_a,
-            mega_block_b=mega_b,
-            virtual_interfaces=virtual_interfaces,
-            centroid=centroid,
-            virtual_face_length=virtual_length,
-            tangent=virtual_tangent,
-            normal=virtual_normal,
-            resultant_fx=total_fx,
-            resultant_fy=total_fy,
-            resultant_magnitude=resultant_magnitude,
-            moment_z=total_moment,
-            eccentricity=eccentricity,
-            application_point=(app_x, app_y),
-            num_virtual_interfaces=len(virtual_interfaces)
-        )
-    
     def analyze_mega_interface_direct(self, mega_a: int, mega_b: int, face_ids: List[int]) -> MegaBlockInterfaceResultant:
         """Analyze interface between two mega blocks using directly specified face IDs"""
         
@@ -612,17 +476,13 @@ class InterfaceAnalyzer:
         centroid_y = sum(v[1] for v in unique_vertices) / len(unique_vertices)
         centroid = (centroid_x, centroid_y)
         
-        # Calculate interface extent
-        min_x = min(v[0] for v in unique_vertices)
-        max_x = max(v[0] for v in unique_vertices)
-        min_y = min(v[1] for v in unique_vertices)
-        max_y = max(v[1] for v in unique_vertices)
-        virtual_length = max(max_x - min_x, max_y - min_y)
-        
-        # Determine interface orientation (use first face as reference)
-        first_face = valid_faces[0]
-        virtual_tangent = first_face.edge_direction
+        # Find the longest face to determine interface orientation
+        longest_face = max(valid_faces, key=lambda f: f.length)
+        virtual_tangent = longest_face.edge_direction
         virtual_normal = (-virtual_tangent[1], virtual_tangent[0])
+        virtual_length = longest_face.length * 2  # Multiply by 2 as requested
+        
+        print(f"DEBUG: Interface orientation from longest face {longest_face.face_id} (length={virtual_length:.3f})")
         
         # Sum forces with correct sign convention
         total_fx = 0.0
@@ -665,22 +525,22 @@ class InterfaceAnalyzer:
                 moment = fx * dy - fy * dx
                 total_moment += moment
         
-        # Calculate resultant properties
-        resultant_magnitude = math.sqrt(total_fx**2 + total_fy**2)
+        # Calculate application point correctly using moment equilibrium
+        tangent_cross_force = total_fx * virtual_tangent[1] - total_fy * virtual_tangent[0]
         
-        # Eccentricity and application point
-        if abs(total_fx) > 1e-12 or abs(total_fy) > 1e-12:
-            eccentricity = abs(total_moment) / (resultant_magnitude + 1e-12)
+        if abs(tangent_cross_force) > 1e-12:
+            # Eccentricity along the interface tangent direction
+            eccentricity_along_tangent = total_moment / tangent_cross_force
             
-            if abs(total_fx) > 1e-12:
-                app_x = centroid[0] + total_moment / total_fx
-                app_y = centroid[1]
-            else:
-                app_x = centroid[0]
-                app_y = centroid[1] + total_moment / (total_fy + 1e-12)
+            # Application point = centroid + eccentricity * tangent_direction
+            app_x = centroid[0] + eccentricity_along_tangent * virtual_tangent[0]
+            app_y = centroid[1] + eccentricity_along_tangent * virtual_tangent[1]
         else:
-            eccentricity = float('inf')
+            # Force is parallel to interface, no moment arm
             app_x, app_y = centroid
+        
+        # Calculate resultant magnitude
+        resultant_magnitude = math.sqrt(total_fx**2 + total_fy**2)
         
         # Create list of virtual interfaces for compatibility
         virtual_interfaces = [(face.block_j, face.block_k) for face in valid_faces]
@@ -697,9 +557,118 @@ class InterfaceAnalyzer:
             resultant_fy=total_fy,
             resultant_magnitude=resultant_magnitude,
             moment_z=total_moment,
-            eccentricity=eccentricity,
+            eccentricity=0.0,
             application_point=(app_x, app_y),
             num_virtual_interfaces=len(valid_faces)
+        )
+    
+    def analyze_mega_interface(self, mega_a: int, mega_b: int) -> MegaBlockInterfaceResultant:
+        """Analyze interface between two mega blocks"""
+        virtual_to_mega = self.get_virtual_to_mega_mapping()
+        
+        # Find all virtual interfaces that contribute to this mega interface
+        virtual_interfaces = []
+        interface_faces = []
+        
+        for geom in self.face_geometries.values():
+            if geom.block_j > 0 and geom.block_k > 0:
+                mega_j = virtual_to_mega.get(geom.block_j)
+                mega_k = virtual_to_mega.get(geom.block_k)
+                
+                if ((mega_j == mega_a and mega_k == mega_b) or 
+                    (mega_j == mega_b and mega_k == mega_a)):
+                    virtual_interfaces.append((geom.block_j, geom.block_k))
+                    interface_faces.append(geom)
+        
+        if not interface_faces:
+            raise ValueError(f"No interface found between mega blocks {mega_a} and {mega_b}")
+        
+        print(f"DEBUG: Mega interface {mega_a}↔{mega_b} contains {len(virtual_interfaces)} virtual interfaces")
+        
+        # Collect all vertices from all interface faces
+        all_vertices = []
+        for face in interface_faces:
+            all_vertices.extend([face.pt1[:2], face.pt2[:2]])
+        
+        # Remove duplicates and calculate centroid
+        unique_vertices = list(set(all_vertices))
+        centroid_x = sum(v[0] for v in unique_vertices) / len(unique_vertices)
+        centroid_y = sum(v[1] for v in unique_vertices) / len(unique_vertices)
+        centroid = (centroid_x, centroid_y)
+        
+        # Find the longest face to determine interface orientation
+        longest_face = max(interface_faces, key=lambda f: f.length)
+        virtual_tangent = longest_face.edge_direction
+        virtual_normal = (-virtual_tangent[1], virtual_tangent[0])
+        virtual_length = longest_face.length * 2  # Multiply by 2 as requested
+        
+        print(f"DEBUG: Interface orientation from longest face {longest_face.face_id} (length={virtual_length:.3f})")
+        
+        # Sum forces from all contributing faces
+        total_fx = 0.0
+        total_fy = 0.0
+        total_moment = 0.0
+        
+        for face in interface_faces:
+            # Determine which mega block this force acts on
+            mega_j = virtual_to_mega.get(face.block_j)
+            mega_k = virtual_to_mega.get(face.block_k)
+            
+            # Get all forces for this face
+            face_forces = [f for f in self.face_forces if f.face_id == face.face_id]
+            
+            for force in face_forces:
+                # Force acts on mega_b, determine sign
+                if mega_k == mega_b:
+                    sign = 1.0
+                else:
+                    sign = -1.0
+                
+                # Global force components
+                fx = sign * (force.fn * face.normal[0] + force.ft * face.tangent[0])
+                fy = sign * (force.fn * face.normal[1] + force.ft * face.tangent[1])
+                
+                total_fx += fx
+                total_fy += fy
+                
+                # Moment about centroid
+                dx = force.point[0] - centroid[0]
+                dy = force.point[1] - centroid[1]
+                moment = fx * dy - fy * dx
+                total_moment += moment
+        
+        # Calculate application point correctly using moment equilibrium
+        tangent_cross_force = total_fx * virtual_tangent[1] - total_fy * virtual_tangent[0]
+        
+        if abs(tangent_cross_force) > 1e-12:
+            # Eccentricity along the interface tangent direction
+            eccentricity_along_tangent = total_moment / tangent_cross_force
+            
+            # Application point = centroid + eccentricity * tangent_direction
+            app_x = centroid[0] + eccentricity_along_tangent * virtual_tangent[0]
+            app_y = centroid[1] + eccentricity_along_tangent * virtual_tangent[1]
+        else:
+            # Force is parallel to interface, no moment arm
+            app_x, app_y = centroid
+        
+        # Calculate resultant magnitude
+        resultant_magnitude = math.sqrt(total_fx**2 + total_fy**2)
+        
+        return MegaBlockInterfaceResultant(
+            mega_block_a=mega_a,
+            mega_block_b=mega_b,
+            virtual_interfaces=virtual_interfaces,
+            centroid=centroid,
+            virtual_face_length=virtual_length,
+            tangent=virtual_tangent,
+            normal=virtual_normal,
+            resultant_fx=total_fx,
+            resultant_fy=total_fy,
+            resultant_magnitude=resultant_magnitude,
+            moment_z=total_moment,
+            eccentricity=0.0,
+            application_point=(app_x, app_y),
+            num_virtual_interfaces=len(virtual_interfaces)
         )
     
     def analyze_interface(self, block_a: int, block_b: int) -> VirtualInterfaceResultant:
@@ -725,24 +694,13 @@ class InterfaceAnalyzer:
         centroid_y = sum(v[1] for v in unique_vertices) / len(unique_vertices)
         centroid = (centroid_x, centroid_y)
         
-        # Find virtual face orientation (longest edge direction)
-        longest_length = 0
-        virtual_tangent = (1, 0)  # Default
-        
-        for face in interface_faces:
-            if face.length > longest_length:
-                longest_length = face.length
-                virtual_tangent = face.edge_direction
+        # Find the longest face to determine interface orientation
+        longest_face = max(interface_faces, key=lambda f: f.length)
+        virtual_tangent = longest_face.edge_direction
+        virtual_length = longest_face.length * 2  # Multiply by 2 as requested
         
         # Virtual face normal (perpendicular to tangent)
         virtual_normal = (-virtual_tangent[1], virtual_tangent[0])
-        
-        # Calculate virtual face length (span of all vertices)
-        min_x = min(v[0] for v in unique_vertices)
-        max_x = max(v[0] for v in unique_vertices)
-        min_y = min(v[1] for v in unique_vertices)
-        max_y = max(v[1] for v in unique_vertices)
-        virtual_length = max(max_x - min_x, max_y - min_y)
         
         # Sum forces acting on block_b
         total_fx = 0.0
@@ -776,24 +734,21 @@ class InterfaceAnalyzer:
                 moment = fx * dy - fy * dx
                 total_moment += moment
         
-        # Calculate resultant properties
-        resultant_magnitude = math.sqrt(total_fx**2 + total_fy**2)
+        # Calculate application point correctly using moment equilibrium
+        tangent_cross_force = total_fx * virtual_tangent[1] - total_fy * virtual_tangent[0]
         
-        # Eccentricity and application point
-        if abs(total_fx) > 1e-12 or abs(total_fy) > 1e-12:
-            # Eccentricity magnitude
-            eccentricity = abs(total_moment) / (resultant_magnitude + 1e-12)
+        if abs(tangent_cross_force) > 1e-12:
+            # Eccentricity along the interface tangent direction
+            eccentricity_along_tangent = total_moment / tangent_cross_force
             
-            # Application point (simplified - along virtual face)
-            if abs(total_fx) > 1e-12:
-                app_x = centroid[0] + total_moment / total_fx
-                app_y = centroid[1]
-            else:
-                app_x = centroid[0]
-                app_y = centroid[1] + total_moment / (total_fy + 1e-12)
+            # Application point = centroid + eccentricity * tangent_direction
+            app_x = centroid[0] + eccentricity_along_tangent * virtual_tangent[0]
+            app_y = centroid[1] + eccentricity_along_tangent * virtual_tangent[1]
+            eccentricity = abs(eccentricity_along_tangent)
         else:
-            eccentricity = float('inf')
+            # Force is parallel to interface, no moment arm
             app_x, app_y = centroid
+            eccentricity = 0.0
         
         return VirtualInterfaceResultant(
             block_a=block_a,
@@ -804,7 +759,7 @@ class InterfaceAnalyzer:
             normal=virtual_normal,
             resultant_fx=total_fx,
             resultant_fy=total_fy,
-            resultant_magnitude=resultant_magnitude,
+            resultant_magnitude=math.sqrt(total_fx**2 + total_fy**2),
             moment_z=total_moment,
             eccentricity=eccentricity,
             application_point=(app_x, app_y)
@@ -861,68 +816,31 @@ class InterfaceAnalyzer:
     def save_results(self, virtual_results: List[VirtualInterfaceResultant], 
                      mega_results: List[MegaBlockInterfaceResultant], 
                      output_file: str) -> None:
-        """Save both virtual and mega interface results to CSV files"""
+        """Save mega interface results to CSV file"""
         
-        # Save virtual interface results
-        virtual_file = output_file.replace('.csv', '_virtual.csv')
-        print(f"\nSaving virtual interface results to: {virtual_file}")
-        
-        with open(virtual_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            
-            # Header for virtual interfaces
-            writer.writerow([
-                'BlockA', 'BlockB', 'Centroid_X', 'Centroid_Y', 'Virtual_Face_Length',
-                'Tangent_X', 'Tangent_Y', 'Normal_X', 'Normal_Y',
-                'Resultant_Fx', 'Resultant_Fy', 'Resultant_Magnitude',
-                'Moment_Z', 'Eccentricity', 'Application_Point_X', 'Application_Point_Y'
-            ])
-            
-            # Data rows for virtual interfaces
-            for r in virtual_results:
-                writer.writerow([
-                    r.block_a, r.block_b,
-                    f"{r.centroid[0]:.6f}", f"{r.centroid[1]:.6f}",
-                    f"{r.virtual_face_length:.6f}",
-                    f"{r.tangent[0]:.6f}", f"{r.tangent[1]:.6f}",
-                    f"{r.normal[0]:.6f}", f"{r.normal[1]:.6f}",
-                    f"{r.resultant_fx:.3f}", f"{r.resultant_fy:.3f}",
-                    f"{r.resultant_magnitude:.3f}",
-                    f"{r.moment_z:.6f}", f"{r.eccentricity:.6f}",
-                    f"{r.application_point[0]:.6f}", f"{r.application_point[1]:.6f}"
-                ])
-        
-        print(f"Saved {len(virtual_results)} virtual interface analyses")
-        
-        # Save mega interface results (if any)
+        # Only save mega interface results (skip virtual interfaces)
         if mega_results:
-            mega_file = output_file.replace('.csv', '_mega.csv')
-            print(f"Saving mega interface results to: {mega_file}")
+            print(f"\nSaving mega interface results to: {output_file}")
             
-            with open(mega_file, 'w', newline='') as f:
+            with open(output_file, 'w', newline='') as f:
                 writer = csv.writer(f)
                 
-                # Header for mega interfaces
+                # Essential header for mega interfaces (removed tangent points)
                 writer.writerow([
-                    'MegaBlockA', 'MegaBlockB', 'Num_Virtual_Interfaces', 'Virtual_Interfaces',
+                    'MegaBlockA', 'MegaBlockB', 'Num_Virtual_Interfaces',
                     'Centroid_X', 'Centroid_Y', 'Virtual_Face_Length',
-                    'Tangent_X', 'Tangent_Y', 'Normal_X', 'Normal_Y',
-                    'Resultant_Fx', 'Resultant_Fy', 'Resultant_Magnitude',
-                    'Moment_Z', 'Eccentricity', 'Application_Point_X', 'Application_Point_Y'
+                    'Resultant_Fx', 'Resultant_Fy', 'Moment_Z', 
+                    'Application_Point_X', 'Application_Point_Y'
                 ])
                 
                 # Data rows for mega interfaces
                 for r in mega_results:
-                    virtual_interfaces_str = ";".join([f"{a}-{b}" for a, b in r.virtual_interfaces])
                     writer.writerow([
-                        r.mega_block_a, r.mega_block_b, r.num_virtual_interfaces, virtual_interfaces_str,
+                        r.mega_block_a, r.mega_block_b, r.num_virtual_interfaces,
                         f"{r.centroid[0]:.6f}", f"{r.centroid[1]:.6f}",
                         f"{r.virtual_face_length:.6f}",
-                        f"{r.tangent[0]:.6f}", f"{r.tangent[1]:.6f}",
-                        f"{r.normal[0]:.6f}", f"{r.normal[1]:.6f}",
-                        f"{r.resultant_fx:.3f}", f"{r.resultant_fy:.3f}",
-                        f"{r.resultant_magnitude:.3f}",
-                        f"{r.moment_z:.6f}", f"{r.eccentricity:.6f}",
+                        f"{r.resultant_fx:.3f}", f"{r.resultant_fy:.3f}", 
+                        f"{r.moment_z:.6f}",
                         f"{r.application_point[0]:.6f}", f"{r.application_point[1]:.6f}"
                     ])
             
@@ -930,43 +848,33 @@ class InterfaceAnalyzer:
         else:
             print("No mega interface results to save")
     
-    def print_summary(self, virtual_results: List[InterfaceResultant], 
-                     mega_results: List[MegaInterfaceResultant]) -> None:
-        """Print a summary of all interfaces"""
+    def print_summary(self, virtual_results: List[VirtualInterfaceResultant], 
+                     mega_results: List[MegaBlockInterfaceResultant]) -> None:
+        """Print a summary focusing on mega block interfaces"""
         
-        # Virtual interfaces summary
-        if virtual_results:
-            print("\n" + "="*80)
-            print("VIRTUAL BLOCK INTERFACE SUMMARY")
-            print("="*80)
-            
-            print(f"{'Interface':<12} {'Fx':<10} {'Fy':<10} {'|F|':<10} {'Moment':<12} {'Ecc.':<10}")
-            print("-" * 80)
-            
-            for r in virtual_results:
-                interface_name = f"{r.block_a}↔{r.block_b}"
-                print(f"{interface_name:<12} {r.resultant_fx:<10.1f} {r.resultant_fy:<10.1f} "
-                      f"{r.resultant_magnitude:<10.1f} {r.moment_z:<12.3f} {r.eccentricity:<10.4f}")
-        
-        # Mega interfaces summary
+        # Mega interfaces summary (primary focus)
         if mega_results:
             print("\n" + "="*80)
             print("MEGA BLOCK INTERFACE SUMMARY")
             print("="*80)
             
-            print(f"{'Interface':<12} {'#Virt':<6} {'Fx':<10} {'Fy':<10} {'|F|':<10} {'Moment':<12} {'Ecc.':<10}")
-            print("-" * 80)
+            print(f"{'Interface':<12} {'#Virt':<6} {'Fx':<10} {'Fy':<10} {'Moment':<12}")
+            print("-" * 60)
             
             for r in mega_results:
                 interface_name = f"M{r.mega_block_a}↔M{r.mega_block_b}"
                 print(f"{interface_name:<12} {r.num_virtual_interfaces:<6} {r.resultant_fx:<10.1f} {r.resultant_fy:<10.1f} "
-                      f"{r.resultant_magnitude:<10.1f} {r.moment_z:<12.3f} {r.eccentricity:<10.4f}")
+                      f"{r.moment_z:<12.3f}")
             
             # Show which virtual interfaces contribute to each mega interface
             print(f"\nMega Interface Composition:")
             for r in mega_results:
                 virtual_list = ", ".join([f"{a}↔{b}" for a, b in r.virtual_interfaces])
                 print(f"  M{r.mega_block_a}↔M{r.mega_block_b}: {virtual_list}")
+        
+        # Brief virtual interfaces summary (secondary)
+        if virtual_results:
+            print(f"\n📊 Virtual interface analysis: {len(virtual_results)} interfaces processed")
         
         if not virtual_results and not mega_results:
             print("\nNo interfaces found to analyze.")
@@ -1012,12 +920,10 @@ def main():
         print(f"📊 Summary: Analyzed {len(virtual_results)} virtual interfaces")
         if mega_results:
             print(f"📊 Summary: Analyzed {len(mega_results)} mega interfaces")
-            print(f"   Results saved to:")
-            print(f"   - Virtual: {output_file.replace('.csv', '_virtual.csv')}")
-            print(f"   - Mega: {output_file.replace('.csv', '_mega.csv')}")
+            print(f"   Results saved to: {output_file}")
         else:
-            print(f"   Results saved to: {output_file.replace('.csv', '_virtual.csv')}")
-            print(f"   (No mega blocks defined - only virtual interface analysis)")
+            print(f"   No mega blocks defined - only virtual interface analysis completed")
+            print(f"   (No output file created - mega interfaces only mode)")
         
         input("\nPress Enter to exit...")
         
