@@ -14,6 +14,7 @@ using System.Xml.Linq;
 using System;
 using System.Net;
 using System.Threading.Channels;
+using InterlockingMasonryLocalForces;
 
 /*
 Mathematical programming model for masonry stability check.
@@ -193,14 +194,21 @@ namespace InterlockingMasonryLocalForces
         public double LoadApplicationY { get; set; } = 0.0;
     }
 
+    public class MegaBlock
+    {
+        public int MegaBlockId { get; set; }
+        public List<int> VirtualBlockIds { get; set; } = new List<int>();
+    }
+
+
     /// A container for all geometry in the problem (faces, vertices, etc.).
     public class GeometryModel
     {
         public Dictionary<int, ContactPoint> Vertices { get; } = new Dictionary<int, ContactPoint>();
         public Dictionary<int, Face> Faces { get; } = new Dictionary<int, Face>();
         public Dictionary<int, Block> Blocks { get; } = new Dictionary<int, Block>();
-
-    }
+        public Dictionary<int, MegaBlock> MegaBlocks { get; } = new Dictionary<int, MegaBlock>();
+}
 
     /// Simple struct to identify one face-vertex pair
     public struct FaceVertexPair
@@ -1084,7 +1092,6 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                         writer.WriteLine($"  ⚠️ WARNING: Critical eccentricity condition!");
                 }
 
-                //7 save used tangents and vectors with both vertices
                 //7 save used tangents and vectors with both vertices AND BLOCK CONNECTIVITY
                 writer.WriteLine("\n--- Face ID, BlockJ, BlockK, Pt1, Pt2, Normal, Tangent ---");
                 foreach (var fEntry in _geometry.Faces)
@@ -1129,7 +1136,18 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                         $"{v2X:F3},{v2Y:F3},0; " +
                         $"{nx:F3},{ny:F3}; " +
                         $"{tx:F3},{ty:F3}"
-                         );
+                    );
+                }
+
+                // 8) Save MegaBlock mapping
+                writer.WriteLine("\n--- MegaBlock ID, Virtual Block IDs ---");
+                foreach (var megaEntry in _geometry.MegaBlocks.OrderBy(m => m.Key))
+                {
+                    int megaId = megaEntry.Key;
+                    MegaBlock mega = megaEntry.Value;
+
+                    string virtualIds = string.Join(";", mega.VirtualBlockIds);
+                    writer.WriteLine($"{megaId},{virtualIds}");
                 }
             }
         }
@@ -2070,6 +2088,62 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                     case "[VectorG]":
                         vectorG.AddRange(ParseLoadLine(trimmedLine, "VectorG", lineNo));
                         break;
+
+                    case "[MegaBlocks]":
+                        if (trimmedLine.StartsWith("MegaBlockID")) continue; // Skip header
+
+                        // Skip empty or whitespace-only lines
+                        if (string.IsNullOrWhiteSpace(trimmedLine)) continue;
+
+                        var megaParts = trimmedLine.Split(',');
+
+                        if (megaParts.Length < 2)
+                        {
+                            Console.WriteLine($"Line {lineNo}: Invalid MegaBlock format. Expected: MegaBlockID, Virtual Block IDs. Skipping.");
+                            continue;
+                        }
+
+                        if (!int.TryParse(megaParts[0].Trim(), out int megaId))
+                        {
+                            Console.WriteLine($"Line {lineNo}: Invalid MegaBlockID '{megaParts[0]}'. Skipping.");
+                            continue;
+                        }
+
+                        var megaBlock = new MegaBlock
+                        {
+                            MegaBlockId = megaId
+                        };
+
+                        // Parse ALL remaining parts as virtual block IDs (not just parts[1])
+                        for (int i = 1; i < megaParts.Length; i++)
+                        {
+                            string virtualIdStr = megaParts[i].Trim();
+
+                            // Skip empty parts
+                            if (string.IsNullOrWhiteSpace(virtualIdStr)) continue;
+
+                            if (int.TryParse(virtualIdStr, out int virtualId))
+                            {
+                                megaBlock.VirtualBlockIds.Add(virtualId);
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Line {lineNo}: Skipping invalid virtual block ID '{virtualIdStr}' for MegaBlock {megaId}");
+                            }
+                        }
+
+                        // Only add the mega block if it has at least one valid virtual block
+                        if (megaBlock.VirtualBlockIds.Count > 0)
+                        {
+                            geometry.MegaBlocks.Add(megaId, megaBlock);
+                            Console.WriteLine($"Loaded MegaBlock {megaId} with {megaBlock.VirtualBlockIds.Count} virtual blocks: {string.Join(", ", megaBlock.VirtualBlockIds)}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Line {lineNo}: MegaBlock {megaId} has no valid virtual blocks. Skipping.");
+                        }
+                        break;
+
                 }
             }
 
