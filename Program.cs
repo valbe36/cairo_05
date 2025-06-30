@@ -904,6 +904,27 @@ namespace InterlockingMasonryLocalForces
 
         private void SaveResultsToFile(GRBModel model, string resultsFilePath, ProblemData data)
         {
+            // =================================================================
+            // OUTPUT CONTROL FLAGS - Set these to control what gets saved
+            // =================================================================
+            bool outputLambda = true;                    // Output 1: Always keep lambda
+            bool outputDetailedForces = false;           // Output 2: Detailed face forces (turn off for walls)
+            bool outputFaceEccentricities = false;      // Output 3: Individual face eccentricities (turn off for walls)
+            bool outputTotalForcesPerFace = false;      // Output 4: Total forces per face (turn off for walls)
+            bool outputCriticalShear = true;            // Output 5: Face-level shear check (KEEP - critical analysis)
+            bool outputCriticalCompression = true;      // Output 6: Face bending/compression check (KEEP - critical analysis)
+            bool outputFaceGeometry = false;            // Output 7: Detailed face geometry (turn off for walls)
+            bool outputMegaBlocks = false;              // Output 8: MegaBlock mapping (turn off for walls)
+
+            // Criticality thresholds for selective output
+            double criticalShearThreshold = 0.80;       // Show faces with shear usage ≥ 80%
+            double criticalCompressionThreshold = 0.80; // Show faces with compression usage ≥ 80%
+            bool onlyShowCriticalFaces = true;          // Only show faces above thresholds
+
+
+
+
+
             // If no solution, do nothing
             if (model.SolCount == 0)
             {
@@ -921,66 +942,73 @@ namespace InterlockingMasonryLocalForces
             using (StreamWriter writer = new StreamWriter(resultsFilePath))
             {
                 // 1) Save lambda
-                try
+                if (outputLambda)
                 {
-                    double lamVal = lambda.Get(GRB.DoubleAttr.X);
-                    writer.WriteLine($"lambda = {lamVal:F4}");
-                    Console.WriteLine($"lambda = {lamVal:F4}");
-                }
-                catch (GRBException e)
-                {
-                    writer.WriteLine($"Could not retrieve lambda: {e.Message}");
-                }
-
-                // 2) Save local (f_n, f_t) for each face–vertex pair
-                writer.WriteLine("\n=== FaceID; Pt; fn; ft ===");
-                for (int j = 0; j < faceVertexPairs.Count; j++)
-                {
-                    int indexFn = 2 * j;
-                    int indexFt = 2 * j + 1;
-                    double fnVal, ftVal;
                     try
                     {
-                        fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
-                        ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
+                        double lamVal = lambda.Get(GRB.DoubleAttr.X);
+                        writer.WriteLine($"lambda = {lamVal:F4}");
+                        Console.WriteLine($"lambda = {lamVal:F4}");
                     }
                     catch (GRBException e)
                     {
-                        writer.WriteLine($"Could not retrieve forces for pair j={j}: {e.Message}");
-                        continue;
+                        writer.WriteLine($"Could not retrieve lambda: {e.Message}");
                     }
+                }
 
-                    var pair = faceVertexPairs[j]; // (faceId, vertexId)
-
-                    // Get vertex coordinates
-                    double ptX = 0.0, ptY = 0.0;
-                    if (_geometry.Vertices.ContainsKey(pair.VertexId))
+                // 2) Save local (f_n, f_t) for each face–vertex pair
+                if (outputDetailedForces)
+                {
+                    writer.WriteLine("\n=== FaceID; Pt; fn; ft ===");
+                    for (int j = 0; j < faceVertexPairs.Count; j++)
                     {
-                        ContactPoint vertex = _geometry.Vertices[pair.VertexId];
-                        ptX = vertex.X;
-                        ptY = vertex.Y;
+                        int indexFn = 2 * j;
+                        int indexFt = 2 * j + 1;
+                        double fnVal, ftVal;
+                        try
+                        {
+                            fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
+                            ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
+                        }
+                        catch (GRBException e)
+                        {
+                            writer.WriteLine($"Could not retrieve forces for pair j={j}: {e.Message}");
+                            continue;
+                        }
+
+                        var pair = faceVertexPairs[j]; // (faceId, vertexId)
+
+                        // Get vertex coordinates
+                        double ptX = 0.0, ptY = 0.0;
+                        if (_geometry.Vertices.ContainsKey(pair.VertexId))
+                        {
+                            ContactPoint vertex = _geometry.Vertices[pair.VertexId];
+                            ptX = vertex.X;
+                            ptY = vertex.Y;
+                        }
+                        writer.WriteLine($"{pair.FaceId}; {ptX:F3},{ptY:F3},0; {fnVal:F3}; {ftVal:F3}");
                     }
-                    writer.WriteLine($"{pair.FaceId}; {ptX:F3},{ptY:F3},0; {fnVal:F3}; {ftVal:F3}");
                 }
 
                 // 3) If we have face eccentricities, print them too
-                writer.WriteLine("\n=== Face Eccentricities (from midpoint) ===");
-                foreach (var kvp in faceEccVars)
+                if (outputFaceEccentricities)
                 {
-                    int faceId = kvp.Key;
-                    GRBVar eVar = kvp.Value;
-                    double e_mid = eVar.X;  // Midpoint eccentricity: -L/2 <= e_mid <= +L/2
+                    writer.WriteLine("\n=== Face Eccentricities (from midpoint) ===");
+                    foreach (var kvp in faceEccVars)
+                    {
+                        int faceId = kvp.Key;
+                        GRBVar eVar = kvp.Value;
+                        double e_mid = eVar.X;
 
-                    // Get face information
-                    Face face = _geometry.Faces[faceId];
-                    double L = face.Length;
-                    double eK = L / 2.0 + e_mid;  // Distance from vertex 1
+                        Face face = _geometry.Faces[faceId];
+                        double L = face.Length;
+                        double eK = L / 2.0 + e_mid;
 
-                    // Get vertex 1 coordinates
-                    int vertex1Id = face.VertexIds[0];
-                    ContactPoint v1 = _geometry.Vertices[vertex1Id];
+                        int vertex1Id = face.VertexIds[0];
+                        ContactPoint v1 = _geometry.Vertices[vertex1Id];
 
-                    writer.WriteLine($"Face {faceId}: e_mid={e_mid:F4}, eK={eK:F4}, v1={v1.X:F3},{v1.Y:F3},0");
+                        writer.WriteLine($"Face {faceId}: e_mid={e_mid:F4}, eK={eK:F4}, v1={v1.X:F3},{v1.Y:F3},0");
+                    }
                 }
 
                 // 4) Compute and save total forces per face
@@ -989,6 +1017,7 @@ namespace InterlockingMasonryLocalForces
 
                 var faceTotalForces = new Dictionary<int, (double fnSum, double ftSum)>();
 
+                // Always compute this for critical analysis, even if not output
                 for (int j = 0; j < faceVertexPairs.Count; j++)
                 {
                     int indexFn = 2 * j;
@@ -997,7 +1026,7 @@ namespace InterlockingMasonryLocalForces
                     double fnVal = fAll[indexFn].Get(GRB.DoubleAttr.X);
                     double ftVal = fAll[indexFt].Get(GRB.DoubleAttr.X);
 
-                    var pair = faceVertexPairs[j]; // (faceId, vertexId)
+                    var pair = faceVertexPairs[j];
 
                     if (!faceTotalForces.ContainsKey(pair.FaceId))
                         faceTotalForces[pair.FaceId] = (0.0, 0.0);
@@ -1005,149 +1034,229 @@ namespace InterlockingMasonryLocalForces
                     var current = faceTotalForces[pair.FaceId];
                     faceTotalForces[pair.FaceId] = (current.fnSum + fnVal, current.ftSum + ftVal);
                 }
-                // Write totals
-                foreach (var kvp in faceTotalForces)
+
+                if (outputTotalForcesPerFace)
                 {
-                    writer.WriteLine($"{kvp.Key},{kvp.Value.fnSum:F3},{kvp.Value.ftSum:F3}");
+                    writer.WriteLine("\n=== Face, Total Fn, Total Ft");
+                    foreach (var kvp in faceTotalForces)
+                    {
+                        writer.WriteLine($"{kvp.Key},{kvp.Value.fnSum:F3},{kvp.Value.ftSum:F3}");
+                    }
                 }
 
 
                 // 5) Shear limits at the FACE level (not vertex level)
-                writer.WriteLine("\n--- Face-level Shear Check ---");
-
-                foreach (var kvp in faceTotalForces)
+                if (outputCriticalShear)
                 {
-                    int faceId = kvp.Key;
-                    double totalNormal = kvp.Value.fnSum;
-                    double totalShear = kvp.Value.ftSum;
+                    writer.WriteLine("\n--- Face-level Shear Check ---");
 
-                    // Get face data
-                    Face face = _geometry.Faces[faceId];
-                    double mu = face.MuOverride ?? data.Mu;
-                    double cohesion = face.CohesionValue;
-                    double area = face.Length * face.Thickness;
-                    double shearLimit = mu * totalNormal + cohesion * area;
+                    var criticalShearFaces = new List<(int faceId, double usage, string status)>();
 
-                    // Shear "usage" ratio
-                    double tiny = 1e-9;  // small offset to avoid divide-by-zero
-                    double usageShear = Math.Abs(totalShear + tiny) / (shearLimit + tiny);
-
-                    // If usage is near 1.0, you're "on" the friction limit
-                    string shearStatus;
-                    double usageTolerance = 0.995;  // or pick something else like 0.99
-                    if (usageShear >= usageTolerance)
-                        shearStatus = "CRITICAL";
-                    else
-                        shearStatus = "OK";
-
-                    writer.WriteLine($"Face {faceId} Shear: ratio={usageShear:F3}, status={shearStatus} " +
-$"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
-                }
-
-                //  6 - Bending/Compression check
-                writer.WriteLine("\n--- Face Bending/Compression Check (Midpoint e) ---");
-
-                foreach (var kvp in faceEccVars)
-                {
-                    int faceId = kvp.Key;
-                    Face face = _geometry.Faces[faceId];
-
-                    double e_mid = kvp.Value.X; // Midpoint eccentricity: -L/2 <= e_mid <= +L/2
-                    double totalNormal = faceTotalForces[faceId].fnSum;
-                    double length = face.Length;
-                    double thickness = face.Thickness;
-                    double sigmaC = data.SigmaC;
-
-                    // CORRECTED: Use absolute value for compression calculation
-                    // The compressed length is L - 2*|e_mid| regardless of sign
-                    double e_abs = Math.Abs(e_mid);
-                    double compressedLength = length - 2.0 * e_abs;
-
-                    // Ensure non-negative (numerical safety)
-                    if (compressedLength < 0.0)
-                        compressedLength = 0.0;
-
-                    // Compressed area = thickness * compressed_length
-                    double areaPrime = compressedLength * thickness;
-
-                    // Actual stress calculation
-                    double tiny = 1e-9;
-                    double actualStress = 0.0;
-                    if (areaPrime > tiny)
-                        actualStress = totalNormal / areaPrime;
-
-                    // Usage ratio = actualStress / sigmaC
-                    double usageBC = (actualStress + tiny) / (sigmaC + tiny);
-
-                    // Status determination
-                    double usageTolerance = 0.995;
-                    string eccStatus = (usageBC >= usageTolerance) ? "CRITICAL" : "OK";
-
-                    // SHORTENED OUTPUT - only essential information
-                    writer.WriteLine($"Face {faceId}: e_mid={e_mid:F4}, fnk={totalNormal:F1}, stress={actualStress:F1}, usage={usageBC:F3} ({eccStatus})");
-
-                    // Concise warnings
-                    if (compressedLength <= 0.01 || e_abs > length / 2.1)
-                        writer.WriteLine($"  ⚠️ WARNING: Critical eccentricity condition!");
-                }
-
-                //7 save used tangents and vectors with both vertices AND BLOCK CONNECTIVITY
-                writer.WriteLine("\n--- Face ID, BlockJ, BlockK, Pt1, Pt2, Normal, Tangent ---");
-                foreach (var fEntry in _geometry.Faces)
-                {
-                    int faceId = fEntry.Key;
-                    Face face = fEntry.Value;
-                    double nx = face.Normal[0];
-                    double ny = face.Normal[1];
-                    double tx = face.Tangent[0];
-                    double ty = face.Tangent[1];
-
-                    // Get coordinates for both vertices
-                    double v1X = 0.0, v1Y = 0.0, v2X = 0.0, v2Y = 0.0;
-
-                    if (face.VertexIds.Count == 2)
+                    foreach (var kvp in faceTotalForces)
                     {
-                        // Vertex 1 (first vertex)
-                        int vId1 = face.VertexIds[0];
-                        if (_geometry.Vertices.ContainsKey(vId1))
-                        {
-                            ContactPoint cp1 = _geometry.Vertices[vId1];
-                            v1X = cp1.X;
-                            v1Y = cp1.Y;
-                        }
+                        int faceId = kvp.Key;
+                        double totalNormal = kvp.Value.fnSum;
+                        double totalShear = kvp.Value.ftSum;
 
-                        // Vertex 2 (second vertex)
-                        int vId2 = face.VertexIds[1];
-                        if (_geometry.Vertices.ContainsKey(vId2))
+                        Face face = _geometry.Faces[faceId];
+                        double mu = face.MuOverride ?? data.Mu;
+                        double cohesion = face.CohesionValue;
+                        double area = face.Length * face.Thickness;
+                        double shearLimit = mu * totalNormal + cohesion * area;
+
+                        double tiny = 1e-9;
+                        double usageShear = Math.Abs(totalShear + tiny) / (shearLimit + tiny);
+
+                        string shearStatus = usageShear >= criticalShearThreshold ? "CRITICAL" : "OK";
+
+                        // Store for potential filtering
+                        criticalShearFaces.Add((faceId, usageShear, shearStatus));
+
+                        // Output decision: show all or only critical
+                        bool showThisFace = !onlyShowCriticalFaces || usageShear >= criticalShearThreshold;
+
+                        if (showThisFace)
                         {
-                            ContactPoint cp2 = _geometry.Vertices[vId2];
-                            v2X = cp2.X;
-                            v2Y = cp2.Y;
+                            writer.WriteLine($"{faceId,4}|{usageShear,11:F3}|{shearStatus,6}|{Math.Abs(totalShear),7:F2}|{shearLimit,6:F2}|μ={mu:F2},c={cohesion:F1},A={area:F2}");
                         }
                     }
 
-                    // Print everything in one line INCLUDING BLOCK CONNECTIVITY
-                    writer.WriteLine(
-                        $"{faceId};" +
-                        $"{face.BlockJ};" +           // ← NEW: BlockJ
-                        $"{face.BlockK};" +           // ← NEW: BlockK  
-                        $"{v1X:F3},{v1Y:F3},0; " +
-                        $"{v2X:F3},{v2Y:F3},0; " +
-                        $"{nx:F3},{ny:F3}; " +
-                        $"{tx:F3},{ty:F3}"
-                    );
+                    // Summary
+                    int totalFaces = criticalShearFaces.Count;
+                    int criticalCount = criticalShearFaces.Count(f => f.usage >= criticalShearThreshold);
+                    writer.WriteLine($"\nSHEAR SUMMARY: {criticalCount}/{totalFaces} faces are critical (≥{criticalShearThreshold:F0}% usage)");
+
+                    if (criticalCount > 0)
+                    {
+                        double maxUsage = criticalShearFaces.Max(f => f.usage);
+                        var mostCritical = criticalShearFaces.Where(f => Math.Abs(f.usage - maxUsage) < 1e-6).First();
+                        writer.WriteLine($"Most critical face: {mostCritical.faceId} with {maxUsage:F1}% usage");
+                    }
                 }
 
-                // 8) Save MegaBlock mapping
-                writer.WriteLine("\n--- MegaBlock ID, Virtual Block IDs ---");
-                foreach (var megaEntry in _geometry.MegaBlocks.OrderBy(m => m.Key))
+                //  6 - Bending/Compression check
+                if (outputCriticalCompression)
                 {
-                    int megaId = megaEntry.Key;
-                    MegaBlock mega = megaEntry.Value;
+                    writer.WriteLine("\n--- Face Bending/Compression Check (Midpoint e) ---");
 
-                    string virtualIds = string.Join(";", mega.VirtualBlockIds);
-                    writer.WriteLine($"{megaId},{virtualIds}");
+                    var criticalCompressionFaces = new List<(int faceId, double usage, string status)>();
+
+                    foreach (var kvp in faceEccVars)
+                    {
+                        int faceId = kvp.Key;
+                        Face face = _geometry.Faces[faceId];
+
+                        double e_mid = kvp.Value.X;
+                        double totalNormal = faceTotalForces[faceId].fnSum;
+                        double length = face.Length;
+                        double thickness = face.Thickness;
+                        double sigmaC = data.SigmaC;
+
+                        // Compression analysis
+                        double e_abs = Math.Abs(e_mid);
+                        double compressedLength = length - 2.0 * e_abs;
+                        if (compressedLength < 0.0) compressedLength = 0.0;
+
+                        double areaPrime = compressedLength * thickness;
+                        double tiny = 1e-9;
+                        double actualStress = areaPrime > tiny ? totalNormal / areaPrime : 0.0;
+                        double usageBC = (actualStress + tiny) / (sigmaC + tiny);
+
+                        string eccStatus = usageBC >= criticalCompressionThreshold ? "CRITICAL" : "OK";
+
+                        // Store for potential filtering
+                        criticalCompressionFaces.Add((faceId, usageBC, eccStatus));
+
+                        // Output decision: show all or only critical
+                        bool showThisFace = !onlyShowCriticalFaces || usageBC >= criticalCompressionThreshold;
+
+                        if (showThisFace)
+                        {
+                            writer.WriteLine($"{faceId,4}|{usageBC,17:F3}|{eccStatus,6}|{e_mid,5:F3}|{totalNormal,3:F0}|{actualStress,6:F0}|L={length:F2},t={thickness:F2},σc={sigmaC:F0}");
+
+                            // Additional warnings for severely critical cases
+                            if (compressedLength <= 0.01 || e_abs > length / 2.1)
+                                writer.WriteLine($"     ⚠️  SEVERE: Critical eccentricity condition!");
+                        }
+                    }
+
+                    // Summary
+                    int totalFaces = criticalCompressionFaces.Count;
+                    int criticalCount = criticalCompressionFaces.Count(f => f.usage >= criticalCompressionThreshold);
+                    writer.WriteLine($"\nCOMPRESSION SUMMARY: {criticalCount}/{totalFaces} faces are critical (≥{criticalCompressionThreshold:F0}% usage)");
+
+                    if (criticalCount > 0)
+                    {
+                        double maxUsage = criticalCompressionFaces.Max(f => f.usage);
+                        var mostCritical = criticalCompressionFaces.Where(f => Math.Abs(f.usage - maxUsage) < 1e-6).First();
+                        writer.WriteLine($"Most critical face: {mostCritical.faceId} with {maxUsage:F1}% usage");
+                    }
                 }
+
+                //7 save used tangents and vectors with both vertices AND BLOCK CONNECTIVITY
+                if (outputFaceGeometry)
+                {
+                    writer.WriteLine("\n--- Face ID, BlockJ, BlockK, Pt1, Pt2, Normal, Tangent ---");
+                    foreach (var fEntry in _geometry.Faces)
+                    {
+                        int faceId = fEntry.Key;
+                        Face face = fEntry.Value;
+
+                        // If showing only critical faces, check if this face is critical
+                        bool isCritical = false;
+                        if (onlyShowCriticalFaces)
+                        {
+                            // Check shear criticality
+                            if (faceTotalForces.ContainsKey(faceId))
+                            {
+                                var forces = faceTotalForces[faceId];
+                                double mu = face.MuOverride ?? data.Mu;
+                                double cohesion = face.CohesionValue;
+                                double area = face.Length * face.Thickness;
+                                double shearLimit = mu * forces.fnSum + cohesion * area;
+                                double shearUsage = Math.Abs(forces.ftSum) / (shearLimit + 1e-9);
+                                if (shearUsage >= criticalShearThreshold) isCritical = true;
+                            }
+
+                            // Check compression criticality
+                            if (faceEccVars.ContainsKey(faceId))
+                            {
+                                double e_mid = faceEccVars[faceId].X;
+                                double totalNormal = faceTotalForces[faceId].fnSum;
+                                double compressedLength = face.Length - 2.0 * Math.Abs(e_mid);
+                                if (compressedLength < 0.0) compressedLength = 0.0;
+                                double areaPrime = compressedLength * face.Thickness;
+                                double actualStress = areaPrime > 1e-9 ? totalNormal / areaPrime : 0.0;
+                                double compressionUsage = actualStress / (data.SigmaC + 1e-9);
+                                if (compressionUsage >= criticalCompressionThreshold) isCritical = true;
+                            }
+                        }
+
+                        // Output this face if we're showing all faces or if it's critical
+                        if (!onlyShowCriticalFaces || isCritical)
+                        {
+                            double nx = face.Normal[0];
+                            double ny = face.Normal[1];
+                            double tx = face.Tangent[0];
+                            double ty = face.Tangent[1];
+
+                            double v1X = 0.0, v1Y = 0.0, v2X = 0.0, v2Y = 0.0;
+
+                            if (face.VertexIds.Count == 2)
+                            {
+                                int vId1 = face.VertexIds[0];
+                                if (_geometry.Vertices.ContainsKey(vId1))
+                                {
+                                    ContactPoint cp1 = _geometry.Vertices[vId1];
+                                    v1X = cp1.X;
+                                    v1Y = cp1.Y;
+                                }
+
+                                int vId2 = face.VertexIds[1];
+                                if (_geometry.Vertices.ContainsKey(vId2))
+                                {
+                                    ContactPoint cp2 = _geometry.Vertices[vId2];
+                                    v2X = cp2.X;
+                                    v2Y = cp2.Y;
+                                }
+                            }
+
+                            writer.WriteLine(
+                                $"{faceId};" +
+                                $"{face.BlockJ};" +
+                                $"{face.BlockK};" +
+                                $"{v1X:F3},{v1Y:F3},0; " +
+                                $"{v2X:F3},{v2Y:F3},0; " +
+                                $"{nx:F3},{ny:F3}; " +
+                                $"{tx:F3},{ty:F3}"
+                            );
+                        }
+                    }
+                }
+
+                // =================================================================
+                // OUTPUT 8: MEGABLOCK MAPPING (Turn off for walls)
+                // =================================================================
+                if (outputMegaBlocks)
+                {
+                    writer.WriteLine("\n--- MegaBlock ID, Virtual Block IDs ---");
+                    foreach (var megaEntry in _geometry.MegaBlocks.OrderBy(m => m.Key))
+                    {
+                        int megaId = megaEntry.Key;
+                        MegaBlock mega = megaEntry.Value;
+
+                        string virtualIds = string.Join(";", mega.VirtualBlockIds);
+                        writer.WriteLine($"{megaId},{virtualIds}");
+                    }
+                }
+
+                // =================================================================
+                // FINAL SUMMARY FOR WALL ANALYSIS
+                // =================================================================
+                writer.WriteLine("\n=== WALL ANALYSIS SUMMARY ===");
+                writer.WriteLine($"Configuration: Lambda output={outputLambda}, Shear analysis={outputCriticalShear}, Compression analysis={outputCriticalCompression}");
+                writer.WriteLine($"Critical thresholds: Shear≥{criticalShearThreshold:F0}%, Compression≥{criticalCompressionThreshold:F0}%");
+                writer.WriteLine($"Filtering: {(onlyShowCriticalFaces ? "Only critical faces shown" : "All faces shown")}");
             }
         }
 
@@ -1754,7 +1863,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 GeometryModel geometry = new GeometryModel();
 
                     // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_wall_friction_0e4.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_wall_VH_friction_0e4.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
                 , geometry, data);
                 DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
