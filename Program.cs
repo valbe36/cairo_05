@@ -225,21 +225,21 @@ namespace InterlockingMasonryLocalForces
     // -----------------------------------------------------------------
     // 2) TheLocalOptimizer class
     // -----------------------------------------------------------------
- 
+
     public class LocalOptimizer
     {
-            // We'll store the list of face-vertex pairs, in order
-            private List<FaceVertexPair> faceVertexPairs;
-            private GeometryModel _geometry;
-            // Gurobi variable array (size = 2 * faceVertexPairs.Count):
-            // the even indices are f_n, the odd are f_t, for that pair.
-            private GRBVar[] fAll;
-            private GRBVar lambda;
-            //  storing Gurobi variables (eccVars) mapped by faceId
-            private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
-            // maps (faceId, vertexId) -> pair index
-            private Dictionary<(int face, int vtx), int> pairIndexMap;
-          
+        // We'll store the list of face-vertex pairs, in order
+        private List<FaceVertexPair> faceVertexPairs;
+        private GeometryModel _geometry;
+        // Gurobi variable array (size = 2 * faceVertexPairs.Count):
+        // the even indices are f_n, the odd are f_t, for that pair.
+        private GRBVar[] fAll;
+        private GRBVar lambda;
+        //  storing Gurobi variables (eccVars) mapped by faceId
+        private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
+        // maps (faceId, vertexId) -> pair index
+        private Dictionary<(int face, int vtx), int> pairIndexMap;
+
         private int GetPairIndex(int faceId, int vertexId) =>
             pairIndexMap.TryGetValue((faceId, vertexId), out int idx) ? idx : -1;
 
@@ -267,26 +267,26 @@ namespace InterlockingMasonryLocalForces
             _geometry = geometry;
 
             pairIndexMap = new Dictionary<(int, int), int>(faceVertexPairs.Count);
-                for (int j = 0; j < faceVertexPairs.Count; j++)
-                {
+            for (int j = 0; j < faceVertexPairs.Count; j++)
+            {
                 var p = faceVertexPairs[j];
                 pairIndexMap[(p.FaceId, p.VertexId)] = j;
-                }
+            }
 
             _geometry = geometry;
             // 2) Make Gurobi environment and model
             using (GRBEnv env = new GRBEnv(true))
+            {
+                env.Start();
+                using (GRBModel model = new GRBModel(env))
                 {
-                    env.Start();
-                    using (GRBModel model = new GRBModel(env))
-                    {
-                        model.ModelName = "PureLocalVariables";
+                    model.ModelName = "PureLocalVariables";
 
-                        // 3) Create local variables fAll, plus lambda
-                        CreateVariables(model, data);
+                    // 3) Create local variables fAll, plus lambda
+                    CreateVariables(model, data);
 
-                        // 4) Add equilibrium constraints:
-                        AddEquilibriumConstraints(model, data);
+                    // 4) Add equilibrium constraints:
+                    AddEquilibriumConstraints(model, data);
 
                     // *** ADD THIS LINE FOR VERIFICATION ***
                     VerifyMatrixVariableCorrespondence(geometry, data);
@@ -298,15 +298,15 @@ namespace InterlockingMasonryLocalForces
 
                     // 6)   Add face eccentricity constraints 
                     // AddFaceEccConstraintsAroundV1(model, geometry, data);
-                     AddMidpointEccConstraintsClaude(model, geometry, data);
+                    AddMidpointEccConstraintsClaude(model, geometry, data);
                     // AddFaceMidpointBendingConstraints(model, geometry, data);
 
                     // 7) Objective: maximize lambda
                     GRBLinExpr obj = 0.0;
-                        obj.AddTerm(1.0, lambda);
-                        model.SetObjective(obj, GRB.MAXIMIZE);
-                        model.Write("debugModel.lp");
-                        
+                    obj.AddTerm(1.0, lambda);
+                    model.SetObjective(obj, GRB.MAXIMIZE);
+                    model.Write("debugModel.lp");
+
 
                     model.Parameters.NumericFocus = 3;      // Maximum precision
                     model.Parameters.FeasibilityTol = 1e-9;  // Less aggressive; 1e-9 Tighter
@@ -348,8 +348,8 @@ namespace InterlockingMasonryLocalForces
                     SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_wall.txt", data);
                     // 10) Print solution
                     PrintSolution(model);
-                    }
                 }
+            }
         }
 
         //  DEBUG  1 Add Debugging Method to Verify Matrix-Variable Correspondence
@@ -576,59 +576,59 @@ namespace InterlockingMasonryLocalForces
         /// </summary>
         /// <param name="model"></param>
         /// <param name="data"></param>
-       
+
         private void CreateVariables(GRBModel model, ProblemData data)
+        {
+            int m = faceVertexPairs.Count; // number of pairs
+            fAll = new GRBVar[2 * m];
+
+            for (int j = 0; j < m; j++)
             {
-                int m = faceVertexPairs.Count; // number of pairs
-                fAll = new GRBVar[2 * m];
+                // f_n >= 0
+                fAll[2 * j] = model.AddVar(
+                    0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
+                    $"fN_{j}"
+                );
 
-                for (int j = 0; j < m; j++)
-                {
-                    // f_n >= 0
-                    fAll[2 * j] = model.AddVar(
-                        0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
-                        $"fN_{j}"
-                    );
-
-                    // f_t unbounded
-                    fAll[2 * j + 1] = model.AddVar(
-                        -GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
-                        $"fT_{j}"
-                    );
-                }
-
-                // Also create lambda
-                lambda = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, "lambda");
-
-                model.Update();
+                // f_t unbounded
+                fAll[2 * j + 1] = model.AddVar(
+                    -GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
+                    $"fT_{j}"
+                );
             }
 
+            // Also create lambda
+            lambda = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, "lambda");
 
-            /// A * fAll - G = B * lambda
-            /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
-         private void AddEquilibriumConstraints(GRBModel model, ProblemData data)
-            {
-                int n = data.NumRows;
-                int p = data.NumCols;  // should match fAll.Length
- 
+            model.Update();
+        }
+
+
+        /// A * fAll - G = B * lambda
+        /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
+        private void AddEquilibriumConstraints(GRBModel model, ProblemData data)
+        {
+            int n = data.NumRows;
+            int p = data.NumCols;  // should match fAll.Length
+
             if (n == 0 || p == 0)
-                    return;
+                return;
 
-                if (p != fAll.Length)
+            if (p != fAll.Length)
+            {
+                Console.WriteLine($"Error: A-matrix has {p} columns but we have {fAll.Length} local variables. Mismatch!");
+                return;
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                GRBLinExpr lhs = 0.0;
+                for (int j = 0; j < p; j++)
                 {
-                    Console.WriteLine($"Error: A-matrix has {p} columns but we have {fAll.Length} local variables. Mismatch!");
-                    return;
+                    double valA = data.MatrixA[i, j];
+                    if (Math.Abs(valA) > 1e-15)
+                        lhs.AddTerm(valA, fAll[j]);
                 }
-
-                for (int i = 0; i < n; i++)
-                {
-                    GRBLinExpr lhs = 0.0;
-                    for (int j = 0; j < p; j++)
-                    {
-                        double valA = data.MatrixA[i, j];
-                        if (Math.Abs(valA) > 1e-15)
-                            lhs.AddTerm(valA, fAll[j]);
-                    }
                 // Subtract the gravity portion G[i]
                 if (data.G != null && i < data.G.Length)
                     lhs.AddConstant(-data.G[i]);
@@ -639,12 +639,12 @@ namespace InterlockingMasonryLocalForces
 
                 // Equilibrium: A*fAll - G - B*lambda = 0
                 model.AddConstr(lhs == 0.0, $"Equil_{i}");
-                }
             }
+        }
 
 
         // vertex based friction limit
-        
+
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             foreach (var faceKvp in geometry.Faces)
@@ -761,7 +761,7 @@ namespace InterlockingMasonryLocalForces
         {
             double sigmaC = data.SigmaC;
 
- 
+
 
             foreach (var fKvp in geometry.Faces)
             {
@@ -864,41 +864,41 @@ namespace InterlockingMasonryLocalForces
             int status = model.Status;
             if (model.SolCount > 0)
             {
-            Console.WriteLine($"Feasible solution found. Status={status}");
-            double lamVal = lambda.X;
-            Console.WriteLine($"lambda = {lamVal:F4}");
+                Console.WriteLine($"Feasible solution found. Status={status}");
+                double lamVal = lambda.X;
+                Console.WriteLine($"lambda = {lamVal:F4}");
 
                 for (int j = 0; j < fAll.Length; j += 2)
                 {
-                double fn = fAll[j].X;
-                double ft = fAll[j + 1].X;
-                // faceVertexPairs[j/2] is the pair info
-                var pair = faceVertexPairs[j / 2];
-                Console.WriteLine($"Pair (face={pair.FaceId}, v={pair.VertexId}): fN={fn:F3}, fT={ft:F3}");
+                    double fn = fAll[j].X;
+                    double ft = fAll[j + 1].X;
+                    // faceVertexPairs[j/2] is the pair info
+                    var pair = faceVertexPairs[j / 2];
+                    Console.WriteLine($"Pair (face={pair.FaceId}, v={pair.VertexId}): fN={fn:F3}, fT={ft:F3}");
                 }
             }
             else
             {
-            Console.WriteLine($"No feasible solution. Status={status}");
+                Console.WriteLine($"No feasible solution. Status={status}");
             }
             if (model.Status == 4)
             //LOADED = 1,  OPTIMAL = 2, INFEASIBLE = 3, INF_OR_UNBD = 4, UNBOUNDED = 5
             {
-            // Sometimes turning off presolve helps to distinguish infeasible from unbounded
-            model.Parameters.Presolve = 0;
-            model.Optimize();
+                // Sometimes turning off presolve helps to distinguish infeasible from unbounded
+                model.Parameters.Presolve = 0;
+                model.Optimize();
 
                 if (model.Status == 3)
-              {
-            Console.WriteLine("Model is infeasible. Computing IIS...");
-            model.ComputeIIS();
-            model.Write("infeasible.ilp");
-              }
-            else if (model.Status == 5)
-              {
-            Console.WriteLine("Model is unbounded!");
-            // Possibly do something else
-              }
+                {
+                    Console.WriteLine("Model is infeasible. Computing IIS...");
+                    model.ComputeIIS();
+                    model.Write("infeasible.ilp");
+                }
+                else if (model.Status == 5)
+                {
+                    Console.WriteLine("Model is unbounded!");
+                    // Possibly do something else
+                }
             }
         }
 
@@ -954,14 +954,28 @@ namespace InterlockingMasonryLocalForces
                     {
                         writer.WriteLine($"Could not retrieve lambda: {e.Message}");
                     }
+                    // ===================================================================
+                    // INSERT DEBUG CODE HERE - RIGHT AFTER LAMBDA OUTPUT
+                    // ===================================================================
+
+                    // ADD THESE DEBUG METHODS:
+                    DebugWallLoadApplication(model, _geometry, data, writer);
+                    DebugWallFaceOrientations(_geometry, writer);
+
+                    // Find the most critical block and analyze it
+                    int criticalBlockId = FindMostCriticalBlock();
+                    if (criticalBlockId > 0)
+                    {
+                        DebugCriticalBlockEquilibrium(model, _geometry, data, criticalBlockId, writer);
+                    }
                 }
+                    // ===================================================================
+                    // END DEBUG CODE INSERTION
+                    // ===================================================================
 
-                ///////// WALL DEBUG
-                
 
-
-                // 2) Save local (f_n, f_t) for each face–vertex pair
-                if (outputDetailedForces)
+            // 2) Save local (f_n, f_t) for each face–vertex pair
+            if (outputDetailedForces)
                 {
                     writer.WriteLine("\n=== FaceID; Pt; fn; ft ===");
                     for (int j = 0; j < faceVertexPairs.Count; j++)
@@ -1137,7 +1151,6 @@ namespace InterlockingMasonryLocalForces
                         if (showThisFace)
                         {
                             writer.WriteLine($"{faceId,4}|{usageBC,17:F3}|{eccStatus,6}|{e_mid,5:F3}|{totalNormal,3:F0}|{actualStress,6:F0}|L={length:F2},t={thickness:F2},σc={sigmaC:F0}");
-
                             // Additional warnings for severely critical cases
                             if (compressedLength <= 0.01 || e_abs > length / 2.1)
                                 writer.WriteLine($"     ⚠️  SEVERE: Critical eccentricity condition!");
@@ -1266,7 +1279,238 @@ namespace InterlockingMasonryLocalForces
 
     } //end public class LocalOptimizer
 
+    private void DebugWallLoadApplication(GRBModel model, GeometryModel geometry, ProblemData data, StreamWriter writer)
+        {
+            if (model.SolCount == 0) return;
 
+            string debugOutput = "\n=== WALL LOAD APPLICATION DEBUG ===";
+            Console.WriteLine(debugOutput);
+            writer.WriteLine(debugOutput);
+
+            // Check B-vector construction
+            var nonSupportBlocks = geometry.Blocks.Values
+                .Where(b => b.Id > 0)
+                .OrderBy(b => b.Id)
+                .ToList();
+
+            string header = "Block | Applied Forces | Load Point | Centroid | Computed Moment | Expected Behavior";
+            Console.WriteLine(header);
+            writer.WriteLine(header);
+
+            string separator = "------|----------------|------------|----------|-----------------|------------------";
+            Console.WriteLine(separator);
+            writer.WriteLine(separator);
+
+            double totalAppliedFx = 0, totalAppliedFy = 0, totalAppliedMoment = 0;
+
+            for (int blockIdx = 0; blockIdx < nonSupportBlocks.Count; blockIdx++)
+            {
+                var block = nonSupportBlocks[blockIdx];
+
+                // B-vector entries for this block
+                int fxRow = blockIdx * 3;
+                int fyRow = blockIdx * 3 + 1;
+                int momentRow = blockIdx * 3 + 2;
+
+                double appliedFx = data.B[fxRow];
+                double appliedFy = data.B[fyRow];
+                double appliedMoment = data.B[momentRow];
+
+                totalAppliedFx += appliedFx;
+                totalAppliedFy += appliedFy;
+                totalAppliedMoment += appliedMoment;
+
+                string loadPoint = $"({block.LoadApplicationX:F1},{block.LoadApplicationY:F1})";
+                string centroid = $"({block.CentroidX:F1},{block.CentroidY:F1})";
+
+                // Determine expected structural behavior
+                string expectedBehavior = "";
+                if (Math.Abs(appliedFx) > 1e-3) // Horizontal load
+                {
+                    if (block.CentroidY > 0.8 * nonSupportBlocks.Max(b => b.CentroidY)) // Top blocks
+                        expectedBehavior = "Overturning source";
+                    else if (block.CentroidY < 0.2 * nonSupportBlocks.Max(b => b.CentroidY)) // Bottom blocks
+                        expectedBehavior = "Should resist overturning";
+                }
+                if (Math.Abs(appliedFy) > 1e-3) // Vertical load (compression)
+                {
+                    expectedBehavior += appliedFy < 0 ? " +Compression" : " +Tension";
+                }
+
+                string output = $"{block.Id,5} | ({appliedFx,4:F0},{appliedFy,4:F0}) | {loadPoint,10} | {centroid,8} | {appliedMoment,7:F1} | {expectedBehavior}";
+                Console.WriteLine(output);
+                writer.WriteLine(output);
+            }
+
+            string summary = $"\nTOTAL APPLIED: Fx={totalAppliedFx:F1}, Fy={totalAppliedFy:F1}, M={totalAppliedMoment:F1}";
+            Console.WriteLine(summary);
+            writer.WriteLine(summary);
+
+            // CRITICAL CHECK: Overall equilibrium of applied loads
+            if (Math.Abs(totalAppliedFx) > 1e-3 || Math.Abs(totalAppliedFy) > 1e-3)
+            {
+                string warning = "⚠️  WARNING: Applied loads are not self-equilibrating!\n   This suggests missing support reactions or incorrect load application.";
+                Console.WriteLine(warning);
+                writer.WriteLine(warning);
+            }
+        }
+
+        private void DebugWallFaceOrientations(GeometryModel geometry, StreamWriter writer)
+        {
+            string debugOutput = "\n=== WALL FACE ORIENTATION DEBUG ===";
+            Console.WriteLine(debugOutput);
+            writer.WriteLine(debugOutput);
+
+            string header = "Face | Blocks | Vertices | Face Vector | Normal | Tangent | Type | Potential Issue";
+            Console.WriteLine(header);
+            writer.WriteLine(header);
+
+            string separator = "-----|--------|----------|-------------|--------|---------|------|----------------";
+            Console.WriteLine(separator);
+            writer.WriteLine(separator);
+
+            foreach (var face in geometry.Faces.Values.OrderBy(f => f.Id))
+            {
+                if (face.VertexIds.Count != 2) continue;
+
+                var v1 = geometry.Vertices[face.VertexIds[0]];
+                var v2 = geometry.Vertices[face.VertexIds[1]];
+
+                // Face vector (v1 → v2)
+                double dx = v2.X - v1.X;
+                double dy = v2.Y - v1.Y;
+                double length = Math.Sqrt(dx * dx + dy * dy);
+
+                string faceVector = $"({dx / length:F2},{dy / length:F2})";
+                string normal = $"({face.Normal[0]:F2},{face.Normal[1]:F2})";
+                string tangent = $"({face.Tangent[0]:F2},{face.Tangent[1]:F2})";
+
+                // Classify face type based on orientation
+                string faceType = "";
+                if (Math.Abs(dy) < 0.1) faceType = "Horizontal";
+                else if (Math.Abs(dx) < 0.1) faceType = "Vertical";
+                else faceType = "Diagonal";
+
+                // Check for potential issues
+                string potentialIssue = "";
+
+                // Check if normal points in expected direction for wall
+                if (faceType == "Horizontal")
+                {
+                    // Horizontal faces should have vertical normals
+                    if (Math.Abs(face.Normal[0]) > 0.5)
+                        potentialIssue += "Normal not vertical ";
+                }
+                else if (faceType == "Vertical")
+                {
+                    // Vertical faces should have horizontal normals
+                    if (Math.Abs(face.Normal[1]) > 0.5)
+                        potentialIssue += "Normal not horizontal ";
+                }
+
+                // Check if blocks make sense for wall structure
+                bool hasSupport = face.BlockJ <= 0 || face.BlockK <= 0;
+                if (!hasSupport && faceType == "Horizontal" && v1.Y < 0.5) // Base interfaces
+                {
+                    potentialIssue += "Base should connect to support ";
+                }
+
+                string output = $"{face.Id,4} | {face.BlockJ,3}↔{face.BlockK,3} | {face.VertexIds[0],3}→{face.VertexIds[1],3} | {faceVector,11} | {normal,6} | {tangent,7} | {faceType,8} | {potentialIssue}";
+                Console.WriteLine(output);
+                writer.WriteLine(output);
+            }
+        }
+
+        private int FindMostCriticalBlock()
+        {
+            // Return the highest block (most likely to have horizontal load)
+            return _geometry.Blocks.Values.Where(b => b.Id > 0).OrderByDescending(b => b.CentroidY).First().Id;
+        }
+
+        private void DebugCriticalBlockEquilibrium(GRBModel model, GeometryModel geometry, ProblemData data, int criticalBlockId, StreamWriter writer)
+        {
+            if (model.SolCount == 0) return;
+
+            string debugOutput = $"\n=== BLOCK {criticalBlockId} DETAILED EQUILIBRIUM ===";
+            Console.WriteLine(debugOutput);
+            writer.WriteLine(debugOutput);
+
+            var block = geometry.Blocks[criticalBlockId];
+            string blockInfo = $"Block {criticalBlockId}: Centroid=({block.CentroidX:F2}, {block.CentroidY:F2})";
+            Console.WriteLine(blockInfo);
+            writer.WriteLine(blockInfo);
+
+            double sumFx = 0, sumFy = 0, sumM = 0;
+
+            string header = "Face | Vertex | fn | ft | Global Fx | Global Fy | Moment | Sign | Comment";
+            Console.WriteLine(header);
+            writer.WriteLine(header);
+
+            string separator = "-----|--------|----|----|-----------|-----------|--------| -----|--------";
+            Console.WriteLine(separator);
+            writer.WriteLine(separator);
+
+            // Check all forces acting on this block
+            for (int j = 0; j < faceVertexPairs.Count; j++)
+            {
+                var pair = faceVertexPairs[j];
+                var face = _geometry.Faces[pair.FaceId];
+
+                // Only consider faces that affect this block
+                if (face.BlockJ != criticalBlockId && face.BlockK != criticalBlockId) continue;
+
+                double fn = fAll[2 * j].X;     // Normal force
+                double ft = fAll[2 * j + 1].X; // Tangential force
+
+                // Determine sign convention
+                double sign = (face.BlockJ == criticalBlockId) ? -1.0 : +1.0;
+                string signNote = (face.BlockJ == criticalBlockId) ? "Block J" : "Block K";
+
+                // Global force components
+                double fx = sign * (fn * face.Normal[0] + ft * face.Tangent[0]);
+                double fy = sign * (fn * face.Normal[1] + ft * face.Tangent[1]);
+
+                sumFx += fx;
+                sumFy += fy;
+
+                // Moment about block centroid
+                var vertex = _geometry.Vertices[pair.VertexId];
+                double xRel = vertex.X - block.CentroidX;
+                double yRel = vertex.Y - block.CentroidY;
+                double moment = fx * yRel - fy * xRel;
+                sumM += moment;
+
+                string comment = "";
+                if (Math.Abs(fn) > 1000) comment += "High normal ";
+                if (Math.Abs(ft) > 1000) comment += "High shear ";
+                if (Math.Abs(ft) > 0.8 * Math.Abs(fn)) comment += "Near friction limit ";
+
+                string output = $"{face.Id,4} | {pair.VertexId,6} | {fn,2:F0} | {ft,2:F0} | {fx,9:F1} | {fy,9:F1} | {moment,6:F1} | {signNote,5} | {comment}";
+                Console.WriteLine(output);
+                writer.WriteLine(output);
+            }
+
+            Console.WriteLine(separator);
+            writer.WriteLine(separator);
+
+            string summary = $"{"SUM",4} | {"",6} | {"",2} | {"",2} | {sumFx,9:F1} | {sumFy,9:F1} | {sumM,6:F1} | {"",5} | Should be ≈0";
+            Console.WriteLine(summary);
+            writer.WriteLine(summary);
+
+            // Equilibrium check
+            if (Math.Abs(sumFx) > 1e-3 || Math.Abs(sumFy) > 1e-3 || Math.Abs(sumM) > 1e-3)
+            {
+                string violation = "❌ EQUILIBRIUM VIOLATION DETECTED!";
+                Console.WriteLine(violation);
+                writer.WriteLine(violation);
+            }
+            else
+            {
+                string ok = "✅ Block equilibrium satisfied";
+                Console.WriteLine(ok);
+                writer.WriteLine(ok);
+            }
+        }
     public class EquilibriumMatrixVerifier
     {
         /// <summary>
