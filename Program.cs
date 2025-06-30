@@ -956,6 +956,10 @@ namespace InterlockingMasonryLocalForces
                     }
                 }
 
+                ///////// WALL DEBUG
+                
+
+
                 // 2) Save local (f_n, f_t) for each face–vertex pair
                 if (outputDetailedForces)
                 {
