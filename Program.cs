@@ -1,19 +1,5 @@
-﻿using System.Globalization;
-using Gurobi;
-using System.IO; 
-using System.Collections.Generic;
-using static InterlockingMasonryLocalForces.ProblemData;
-using System.Reflection;
-using static System.Runtime.InteropServices.JavaScript.JSType;
-using System.ComponentModel;
-using System.Data.Common;
-using System.Diagnostics.Metrics;
-using System.Numerics;
-using System.Runtime.Intrinsics.X86;
-using System.Xml.Linq;
-using System;
-using System.Net;
-using System.Threading.Channels;
+﻿using Gurobi;
+using System.Globalization;
 
 /*
 Mathematical programming model for masonry stability check.
@@ -48,7 +34,7 @@ namespace InterlockingMasonryLocalForces
         public double[] G { get; set; }
         public int NumBlocks { get; set; }
         public double Mu { get; set; } = 0.4;
-        public double SigmaC { get; set; } = 8200;
+        public double SigmaC { get; set; } = 45000;
 
         public int NumRows => MatrixA?.GetLength(0) ?? 0;
         public int NumCols => MatrixA?.GetLength(1) ?? 0;
@@ -130,12 +116,12 @@ namespace InterlockingMasonryLocalForces
                         double xRelK = cp.X - bK.CentroidX;
                         double yRelK = cp.Y - bK.CentroidY;
 
-                        matrixA[kRow, colN] += + n[0];
+                        matrixA[kRow, colN] += +n[0];
                         matrixA[kRow, colT] += +t[0];
                         matrixA[kRow + 1, colN] += +n[1];
-                        matrixA[kRow + 1, colT] += + t[1];
-                        matrixA[kRow + 2, colN] += + (xRelK * n[1] - yRelK * n[0]);
-                        matrixA[kRow + 2, colT] += + (xRelK * t[1] - yRelK * t[0]);
+                        matrixA[kRow + 1, colT] += +t[1];
+                        matrixA[kRow + 2, colN] += +(xRelK * n[1] - yRelK * n[0]);
+                        matrixA[kRow + 2, colT] += +(xRelK * t[1] - yRelK * t[0]);
                     }
                 }
             } // end foreach face
@@ -217,21 +203,21 @@ namespace InterlockingMasonryLocalForces
     // -----------------------------------------------------------------
     // 2) TheLocalOptimizer class
     // -----------------------------------------------------------------
- 
+
     public class LocalOptimizer
     {
-            // We'll store the list of face-vertex pairs, in order
-            private List<FaceVertexPair> faceVertexPairs;
-            private GeometryModel _geometry;
-            // Gurobi variable array (size = 2 * faceVertexPairs.Count):
-            // the even indices are f_n, the odd are f_t, for that pair.
-            private GRBVar[] fAll;
-            private GRBVar lambda;
-            //  storing Gurobi variables (eccVars) mapped by faceId
-            private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
-            // maps (faceId, vertexId) -> pair index
-            private Dictionary<(int face, int vtx), int> pairIndexMap;
-          
+        // We'll store the list of face-vertex pairs, in order
+        private List<FaceVertexPair> faceVertexPairs;
+        private GeometryModel _geometry;
+        // Gurobi variable array (size = 2 * faceVertexPairs.Count):
+        // the even indices are f_n, the odd are f_t, for that pair.
+        private GRBVar[] fAll;
+        private GRBVar lambda;
+        //  storing Gurobi variables (eccVars) mapped by faceId
+        private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
+        // maps (faceId, vertexId) -> pair index
+        private Dictionary<(int face, int vtx), int> pairIndexMap;
+
         private int GetPairIndex(int faceId, int vertexId) =>
             pairIndexMap.TryGetValue((faceId, vertexId), out int idx) ? idx : -1;
 
@@ -259,26 +245,26 @@ namespace InterlockingMasonryLocalForces
             _geometry = geometry;
 
             pairIndexMap = new Dictionary<(int, int), int>(faceVertexPairs.Count);
-                for (int j = 0; j < faceVertexPairs.Count; j++)
-                {
+            for (int j = 0; j < faceVertexPairs.Count; j++)
+            {
                 var p = faceVertexPairs[j];
                 pairIndexMap[(p.FaceId, p.VertexId)] = j;
-                }
+            }
 
             _geometry = geometry;
             // 2) Make Gurobi environment and model
             using (GRBEnv env = new GRBEnv(true))
+            {
+                env.Start();
+                using (GRBModel model = new GRBModel(env))
                 {
-                    env.Start();
-                    using (GRBModel model = new GRBModel(env))
-                    {
-                        model.ModelName = "PureLocalVariables";
+                    model.ModelName = "PureLocalVariables";
 
-                        // 3) Create local variables fAll, plus lambda
-                        CreateVariables(model, data);
+                    // 3) Create local variables fAll, plus lambda
+                    CreateVariables(model, data);
 
-                        // 4) Add equilibrium constraints:
-                        AddEquilibriumConstraints(model, data);
+                    // 4) Add equilibrium constraints:
+                    AddEquilibriumConstraints(model, data);
 
                     // *** ADD THIS LINE FOR VERIFICATION ***
                     VerifyMatrixVariableCorrespondence(geometry, data);
@@ -290,15 +276,15 @@ namespace InterlockingMasonryLocalForces
 
                     // 6)   Add face eccentricity constraints 
                     // AddFaceEccConstraintsAroundV1(model, geometry, data);
-                     AddMidpointEccConstraintsClaude(model, geometry, data);
+                    AddMidpointEccConstraintsClaude(model, geometry, data);
                     // AddFaceMidpointBendingConstraints(model, geometry, data);
 
                     // 7) Objective: maximize lambda
                     GRBLinExpr obj = 0.0;
-                        obj.AddTerm(1.0, lambda);
-                        model.SetObjective(obj, GRB.MAXIMIZE);
-                        model.Write("debugModel.lp");
-                        
+                    obj.AddTerm(1.0, lambda);
+                    model.SetObjective(obj, GRB.MAXIMIZE);
+                    model.Write("debugModel.lp");
+
 
                     model.Parameters.NumericFocus = 3;      // Maximum precision
                     model.Parameters.FeasibilityTol = 1e-9;  // Less aggressive; 1e-9 Tighter
@@ -321,8 +307,8 @@ namespace InterlockingMasonryLocalForces
 
                     // model.Parameters.MIPGap = 0.0005;
                     model.Parameters.TimeLimit = 1000; // Limit to 600 seconds
-                    //model.Parameters.Quad = 1;       // Convex quadratic relaxation
-            
+                                                       //model.Parameters.Quad = 1;       // Convex quadratic relaxation
+
 
                     // 8) Solve
                     model.Optimize();
@@ -339,8 +325,8 @@ namespace InterlockingMasonryLocalForces
                     SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt", data);
                     // 10) Print solution
                     PrintSolution(model);
-                    }
                 }
+            }
         }
 
         //  DEBUG  1 Add Debugging Method to Verify Matrix-Variable Correspondence
@@ -567,59 +553,59 @@ namespace InterlockingMasonryLocalForces
         /// </summary>
         /// <param name="model"></param>
         /// <param name="data"></param>
-       
+
         private void CreateVariables(GRBModel model, ProblemData data)
+        {
+            int m = faceVertexPairs.Count; // number of pairs
+            fAll = new GRBVar[2 * m];
+
+            for (int j = 0; j < m; j++)
             {
-                int m = faceVertexPairs.Count; // number of pairs
-                fAll = new GRBVar[2 * m];
+                // f_n >= 0
+                fAll[2 * j] = model.AddVar(
+                    0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
+                    $"fN_{j}"
+                );
 
-                for (int j = 0; j < m; j++)
-                {
-                    // f_n >= 0
-                    fAll[2 * j] = model.AddVar(
-                        0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
-                        $"fN_{j}"
-                    );
-
-                    // f_t unbounded
-                    fAll[2 * j + 1] = model.AddVar(
-                        -GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
-                        $"fT_{j}"
-                    );
-                }
-
-                // Also create lambda
-                lambda = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, "lambda");
-
-                model.Update();
+                // f_t unbounded
+                fAll[2 * j + 1] = model.AddVar(
+                    -GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
+                    $"fT_{j}"
+                );
             }
 
+            // Also create lambda
+            lambda = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, "lambda");
 
-            /// A * fAll - G = B * lambda
-            /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
-         private void AddEquilibriumConstraints(GRBModel model, ProblemData data)
-            {
-                int n = data.NumRows;
-                int p = data.NumCols;  // should match fAll.Length
- 
+            model.Update();
+        }
+
+
+        /// A * fAll - G = B * lambda
+        /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
+        private void AddEquilibriumConstraints(GRBModel model, ProblemData data)
+        {
+            int n = data.NumRows;
+            int p = data.NumCols;  // should match fAll.Length
+
             if (n == 0 || p == 0)
-                    return;
+                return;
 
-                if (p != fAll.Length)
+            if (p != fAll.Length)
+            {
+                Console.WriteLine($"Error: A-matrix has {p} columns but we have {fAll.Length} local variables. Mismatch!");
+                return;
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                GRBLinExpr lhs = 0.0;
+                for (int j = 0; j < p; j++)
                 {
-                    Console.WriteLine($"Error: A-matrix has {p} columns but we have {fAll.Length} local variables. Mismatch!");
-                    return;
+                    double valA = data.MatrixA[i, j];
+                    if (Math.Abs(valA) > 1e-15)
+                        lhs.AddTerm(valA, fAll[j]);
                 }
-
-                for (int i = 0; i < n; i++)
-                {
-                    GRBLinExpr lhs = 0.0;
-                    for (int j = 0; j < p; j++)
-                    {
-                        double valA = data.MatrixA[i, j];
-                        if (Math.Abs(valA) > 1e-15)
-                            lhs.AddTerm(valA, fAll[j]);
-                    }
                 // Subtract the gravity portion G[i]
                 if (data.G != null && i < data.G.Length)
                     lhs.AddConstant(-data.G[i]);
@@ -630,12 +616,12 @@ namespace InterlockingMasonryLocalForces
 
                 // Equilibrium: A*fAll - G - B*lambda = 0
                 model.AddConstr(lhs == 0.0, $"Equil_{i}");
-                }
             }
+        }
 
 
         // vertex based friction limit
-        
+
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
             foreach (var faceKvp in geometry.Faces)
@@ -857,41 +843,41 @@ namespace InterlockingMasonryLocalForces
             int status = model.Status;
             if (model.SolCount > 0)
             {
-            Console.WriteLine($"Feasible solution found. Status={status}");
-            double lamVal = lambda.X;
-            Console.WriteLine($"lambda = {lamVal:F4}");
+                Console.WriteLine($"Feasible solution found. Status={status}");
+                double lamVal = lambda.X;
+                Console.WriteLine($"lambda = {lamVal:F4}");
 
                 for (int j = 0; j < fAll.Length; j += 2)
                 {
-                double fn = fAll[j].X;
-                double ft = fAll[j + 1].X;
-                // faceVertexPairs[j/2] is the pair info
-                var pair = faceVertexPairs[j / 2];
-                Console.WriteLine($"Pair (face={pair.FaceId}, v={pair.VertexId}): fN={fn:F3}, fT={ft:F3}");
+                    double fn = fAll[j].X;
+                    double ft = fAll[j + 1].X;
+                    // faceVertexPairs[j/2] is the pair info
+                    var pair = faceVertexPairs[j / 2];
+                    Console.WriteLine($"Pair (face={pair.FaceId}, v={pair.VertexId}): fN={fn:F3}, fT={ft:F3}");
                 }
             }
             else
             {
-            Console.WriteLine($"No feasible solution. Status={status}");
+                Console.WriteLine($"No feasible solution. Status={status}");
             }
             if (model.Status == 4)
             //LOADED = 1,  OPTIMAL = 2, INFEASIBLE = 3, INF_OR_UNBD = 4, UNBOUNDED = 5
             {
-            // Sometimes turning off presolve helps to distinguish infeasible from unbounded
-            model.Parameters.Presolve = 0;
-            model.Optimize();
+                // Sometimes turning off presolve helps to distinguish infeasible from unbounded
+                model.Parameters.Presolve = 0;
+                model.Optimize();
 
                 if (model.Status == 3)
-              {
-            Console.WriteLine("Model is infeasible. Computing IIS...");
-            model.ComputeIIS();
-            model.Write("infeasible.ilp");
-              }
-            else if (model.Status == 5)
-              {
-            Console.WriteLine("Model is unbounded!");
-            // Possibly do something else
-              }
+                {
+                    Console.WriteLine("Model is infeasible. Computing IIS...");
+                    model.ComputeIIS();
+                    model.Write("infeasible.ilp");
+                }
+                else if (model.Status == 5)
+                {
+                    Console.WriteLine("Model is unbounded!");
+                    // Possibly do something else
+                }
             }
         }
 
@@ -1741,8 +1727,8 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 ProblemData data = new ProblemData();
                 GeometryModel geometry = new GeometryModel();
 
-                    // Load faces and geometry 
-                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/stepped_friction_0e2.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
+                // Load faces and geometry 
+                LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_icsa_friction_0e4.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
                 , geometry, data);
                 DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
@@ -1769,19 +1755,19 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
 
                 // add matrix debug output
                 if (data.NumRows != data.B.Length)
-                        throw new Exception("Matrix rows must match VectorB length.");
-                    Console.WriteLine("First 5 rows of Matrix A:");
-                    for (int r = 0; r < Math.Min(5, data.NumRows); r++)
-                    {
-                        string row = "";
-                        for (int c = 0; c < Math.Min(10, data.NumCols); c++)
-                            row += $"{data.MatrixA[r, c]:F2} ";
-                        Console.WriteLine($"Row {r}: {row}");
-                    }
-          
+                    throw new Exception("Matrix rows must match VectorB length.");
+                Console.WriteLine("First 5 rows of Matrix A:");
+                for (int r = 0; r < Math.Min(5, data.NumRows); r++)
+                {
+                    string row = "";
+                    for (int c = 0; c < Math.Min(10, data.NumCols); c++)
+                        row += $"{data.MatrixA[r, c]:F2} ";
+                    Console.WriteLine($"Row {r}: {row}");
+                }
 
-                    DumpFaceData(geometry, "interlocking");   // or "plain", etc.
-                 
+
+                DumpFaceData(geometry, "interlocking");   // or "plain", etc.
+
                 // 5) Solve with the local approach
                 LocalOptimizer optimizer = new LocalOptimizer();
                 optimizer.SolveProblem(geometry, data);
@@ -1925,7 +1911,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
 
 
 
-            static void LoadAllData(string filePath, GeometryModel geometry, ProblemData data)
+        static void LoadAllData(string filePath, GeometryModel geometry, ProblemData data)
         {
             string currentSection = "";
             var vectorG = new List<double>();
@@ -2024,7 +2010,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                             BlockJ = int.Parse(faceParts[1]),
                             BlockK = int.Parse(faceParts[2]),
                             VertexIds = new List<int> { int.Parse(faceParts[3]), int.Parse(faceParts[4]) },
-                           
+
                             Thickness = double.Parse(faceParts[5]),
                             CohesionValue = double.Parse(faceParts[6]),
                             MuOverride = double.Parse(faceParts[7])
@@ -2060,7 +2046,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                             Console.WriteLine($"Line {lineNo}: Skipping face {face.Id} due to missing vertices");
                             continue;
                         }
-    
+
                         geometry.Faces.Add(face.Id, face);
                         break;
 
@@ -2092,7 +2078,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             return Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
         }
 
- 
+
         public static void ComputeFaceNormalsFromGeometry(GeometryModel geometry)
         {
             foreach (var face in geometry.Faces.Values)
@@ -2236,8 +2222,8 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             }
         }
 
- 
-        
+
+
         // be informed if some input data is modified by the solver 
         static void LogDataModification(int lineNo, string message)
         {
