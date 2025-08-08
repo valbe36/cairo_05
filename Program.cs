@@ -35,7 +35,7 @@ namespace InterlockingMasonryLocalForces
         public int NumBlocks { get; set; }
         public double Mu { get; set; } = 0.4;
         public double SigmaC { get; set; } = 45000;
-
+        public double TensileStrength { get; set; } = 4500;  // New: tensile strength (MPa)
         public int NumRows => MatrixA?.GetLength(0) ?? 0;
         public int NumCols => MatrixA?.GetLength(1) ?? 0;
         public int ExpectedNumVariables { get; set; }
@@ -53,28 +53,34 @@ namespace InterlockingMasonryLocalForces
             Dictionary<int, int> blockRowMap = nonSupportBlocks
             .Select((b, idx) => new { b.Id, idx })
             .ToDictionary(x => x.Id, x => x.idx * 3);
-            // Step 1: Create a column map for (faceId, vertexId) → column index
+
+            // Step 1:   Column structure: [fn_comp, fn_tens, ft, fn_comp, fn_tens, ft, ...]
             Dictionary<(int FaceId, int VertexId), int> columnMap = new Dictionary<(int, int), int>();
             int colIdx = 0;
+
             foreach (var face in geometry.Faces.Values.OrderBy(f => f.Id))
             {
                 foreach (int vId in face.VertexIds)
                 {
-                    columnMap[(face.Id, vId)] = colIdx++;
+                    columnMap[(face.Id, vId)] = colIdx;
+                    colIdx += 3; // Always exactly 3 variables per face-vertex pair
                 }
             }
 
-            int numRows = numBlocks * 3;
-            int numCols = columnMap.Count * 2; // 2 variables (N,T) per (face,vertex)
+            int numRows = numBlocks * 3; // 3 equilibrium equations per block
+            int numCols = colIdx; // Total columns = 3 * (number of face-vertex pairs)
             double[,] matrixA = new double[numRows, numCols];
 
-            // Step 2: Fill matrix row by row
+            Console.WriteLine($"Matrix dimensions: {numRows} rows x {numCols} cols");
+            Console.WriteLine($"Face-vertex pairs: {numCols / 3}");
+
+            // Fill matrix row by row - uniform processing for all faces
             foreach (var face in geometry.Faces.Values.OrderBy(f => f.Id))
             {
                 bool isJSupport = face.BlockJ <= 0;
                 bool isKSupport = face.BlockK <= 0;
 
-                // If both J, K are supports, skip entirely
+                // Skip faces where both blocks are supports
                 if (isJSupport && isKSupport)
                     continue;
 
@@ -83,51 +89,73 @@ namespace InterlockingMasonryLocalForces
 
                 foreach (int vId in face.VertexIds)
                 {
-                    // locate the column for this face‐vertex
-                    int colPairIndex = columnMap[(face.Id, vId)];
-                    int colN = colPairIndex * 2;
-                    int colT = colN + 1;
+                    // Get base column index for this face-vertex pair
+                    int baseColIndex = columnMap[(face.Id, vId)];
+
+                    // UNIFORM: Always 3 variables at predictable positions
+                    int colN_comp = baseColIndex;     // Compression force (fn_comp)
+                    int colN_tens = baseColIndex + 1; // Tension force (fn_tens)  
+                    int colT = baseColIndex + 2;      // Tangential force (ft)
 
                     ContactPoint cp = geometry.Vertices[vId];
 
-                    // If J is non‐support, add the “minus” contribution to blockJ
+                    // Process Block J (if not a support)
                     if (!isJSupport && blockRowMap.TryGetValue(face.BlockJ, out int jRow))
                     {
-                        // local coords of cp relative to blockJ centroid
                         var bJ = geometry.Blocks[face.BlockJ];
                         double xRelJ = cp.X - bJ.CentroidX;
                         double yRelJ = cp.Y - bJ.CentroidY;
 
-                        // Fx
-                        matrixA[jRow, colN] -= n[0];
-                        matrixA[jRow, colT] -= t[0];
-                        // Fy
-                        matrixA[jRow + 1, colN] -= n[1];
-                        matrixA[jRow + 1, colT] -= t[1];
-                        // M
-                        matrixA[jRow + 2, colN] -= (xRelJ * n[1] - yRelJ * n[0]);
-                        matrixA[jRow + 2, colT] -= (xRelJ * t[1] - yRelJ * t[0]);
+                        // Net normal force contribution to equilibrium
+                        // For Block J: forces point "away" from the block (negative contribution)
+
+                        // Compression contribution (positive variable, negative contribution to equilibrium)
+                        matrixA[jRow, colN_comp] -= n[0];     // Force X equilibrium
+                        matrixA[jRow + 1, colN_comp] -= n[1]; // Force Y equilibrium
+                        matrixA[jRow + 2, colN_comp] -= (xRelJ * n[1] - yRelJ * n[0]); // Moment equilibrium
+
+                        // Tension contribution - (fn_tens ≤ 0, net = comp + tens)
+                        matrixA[jRow, colN_tens] -= n[0];     // Add tension (which is negative)
+                        matrixA[jRow + 1, colN_tens] -= n[1];
+                        matrixA[jRow + 2, colN_tens] -= (xRelJ * n[1] - yRelJ * n[0]);
+
+                        // Tangential force contribution
+                        matrixA[jRow, colT] -= t[0];     // Force X equilibrium
+                        matrixA[jRow + 1, colT] -= t[1]; // Force Y equilibrium
+                        matrixA[jRow + 2, colT] -= (xRelJ * t[1] - yRelJ * t[0]); // Moment equilibrium
                     }
 
-                    // If K is non‐support, add the “plus” contribution to blockK
+                    // Process Block K (if not a support)
                     if (!isKSupport && blockRowMap.TryGetValue(face.BlockK, out int kRow))
                     {
                         var bK = geometry.Blocks[face.BlockK];
                         double xRelK = cp.X - bK.CentroidX;
                         double yRelK = cp.Y - bK.CentroidY;
 
-                        matrixA[kRow, colN] += +n[0];
-                        matrixA[kRow, colT] += +t[0];
-                        matrixA[kRow + 1, colN] += +n[1];
-                        matrixA[kRow + 1, colT] += +t[1];
-                        matrixA[kRow + 2, colN] += +(xRelK * n[1] - yRelK * n[0]);
-                        matrixA[kRow + 2, colT] += +(xRelK * t[1] - yRelK * t[0]);
+                        // Net normal force contribution to equilibrium
+                        // For Block K: forces point "toward" the block (positive contribution)
+
+                        // Compression contribution (positive variable, positive contribution to equilibrium)
+                        matrixA[kRow, colN_comp] += n[0];     // Force X equilibrium
+                        matrixA[kRow + 1, colN_comp] += n[1]; // Force Y equilibrium
+                        matrixA[kRow + 2, colN_comp] += (xRelK * n[1] - yRelK * n[0]); // Moment equilibrium
+
+                        // Tension contribution -  (fn_tens ≤ 0, net = comp + tens)
+                        matrixA[kRow, colN_tens] += n[0];     // Add tension (which is negative)
+                        matrixA[kRow + 1, colN_tens] += n[1];
+                        matrixA[kRow + 2, colN_tens] += (xRelK * n[1] - yRelK * n[0]);
+
+                        // Tangential force contribution
+                        matrixA[kRow, colT] += t[0];     // Force X equilibrium
+                        matrixA[kRow + 1, colT] += t[1]; // Force Y equilibrium
+                        matrixA[kRow + 2, colT] += (xRelK * t[1] - yRelK * t[0]); // Moment equilibrium
                     }
                 }
             } // end foreach face
 
             return matrixA;
         }
+
 
         private static int GetColumnIndex(int faceId, int vertexId)
         {
@@ -158,6 +186,7 @@ namespace InterlockingMasonryLocalForces
         public double Length { get; set; }
         public double CohesionValue { get; set; }
         public double? MuOverride { get; set; }
+        public bool IsInternal { get; set; } = false;  // New: marks internal crack faces
 
         public List<int> VertexIds { get; set; } = new List<int>();
         public double[] Normal { get; set; } = new double[2];   // [nx, ny], unit vector
@@ -209,15 +238,16 @@ namespace InterlockingMasonryLocalForces
         // We'll store the list of face-vertex pairs, in order
         private List<FaceVertexPair> faceVertexPairs;
         private GeometryModel _geometry;
-        // Gurobi variable array (size = 2 * faceVertexPairs.Count):
-        // the even indices are f_n, the odd are f_t, for that pair.
         private GRBVar[] fAll;
         private GRBVar lambda;
+        private GRBVar[] fnNetVars;  // Fn_net = Fn_comp + Fn_tens
+        private GRBVar[] binaryVars; // z_i = 1 if Fn_net_i > 0, 0 otherwise
         //  storing Gurobi variables (eccVars) mapped by faceId
         private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
         // maps (faceId, vertexId) -> pair index
         private Dictionary<(int face, int vtx), int> pairIndexMap;
-
+        // Uniform variable mapping: every face-vertex has exactly 3 variables
+        private Dictionary<(int faceId, int vertexId), int> baseVarIndexMap;
         private int GetPairIndex(int faceId, int vertexId) =>
             pairIndexMap.TryGetValue((faceId, vertexId), out int idx) ? idx : -1;
 
@@ -226,44 +256,41 @@ namespace InterlockingMasonryLocalForces
         {
             // 1) Collect face-vertex pairs in EXACTLY THE SAME ORDER as matrix construction
             faceVertexPairs = new List<FaceVertexPair>();
+            pairIndexMap = new Dictionary<(int, int), int>();
 
             // Use the SAME ordering as BuildEquilibriumMatrix
-            foreach (var face in geometry.Faces.Values.OrderBy(f => f.Id))  // ← SAME as matrix!
+            foreach (var face in geometry.Faces.Values.OrderBy(f => f.Id))
             {
                 foreach (int vId in face.VertexIds)
                 {
-                    faceVertexPairs.Add(new FaceVertexPair(face.Id, vId));
+                    var pair = new FaceVertexPair(face.Id, vId);
+                    pairIndexMap[(face.Id, vId)] = faceVertexPairs.Count;
+                    faceVertexPairs.Add(pair);
                 }
             }
-            pairIndexMap = new Dictionary<(int, int), int>(faceVertexPairs.Count);
-            for (int j = 0; j < faceVertexPairs.Count; j++)
-            {
-                var p = faceVertexPairs[j];
-                pairIndexMap[(p.FaceId, p.VertexId)] = j;
-            }
 
             _geometry = geometry;
 
-            pairIndexMap = new Dictionary<(int, int), int>(faceVertexPairs.Count);
-            for (int j = 0; j < faceVertexPairs.Count; j++)
-            {
-                var p = faceVertexPairs[j];
-                pairIndexMap[(p.FaceId, p.VertexId)] = j;
-            }
-
-            _geometry = geometry;
             // 2) Make Gurobi environment and model
             using (GRBEnv env = new GRBEnv(true))
             {
                 env.Start();
                 using (GRBModel model = new GRBModel(env))
                 {
-                    model.ModelName = "PureLocalVariables";
 
-                    // 3) Create local variables fAll, plus lambda
+                    // a) Create local variables fAll, plus lambda
                     CreateVariables(model, data);
 
-                    // 4) Add equilibrium constraints:
+                    // b) Add tension constraints (fn_tens = 0 for external faces)
+                    CreateTensionConstraints(model);
+
+                    // c. Auxiliary variable definitions (Fn_net = Fn_comp + Fn_tens)
+                    CreateAuxiliaryConstraints(model);
+
+                    // d. Contact/friction constraints (updated to use auxiliary variables)
+                    AddContactConstraints(model, geometry, data);
+
+                    // e) Add equilibrium constraints:
                     AddEquilibriumConstraints(model, data);
 
                     // *** ADD THIS LINE FOR VERIFICATION ***
@@ -271,15 +298,13 @@ namespace InterlockingMasonryLocalForces
 
                     model.VerifyEquilibrium(data, faceVertexPairs, fAll, lambda, geometry);
 
-                    // 5) Add friction & no-tension constraints
-                    AddContactConstraints(model, geometry, data);
 
-                    // 6)   Add face eccentricity constraints 
+                    // 7)   Add face eccentricity constraints 
                     // AddFaceEccConstraintsAroundV1(model, geometry, data);
                     AddMidpointEccConstraintsClaude(model, geometry, data);
                     // AddFaceMidpointBendingConstraints(model, geometry, data);
 
-                    // 7) Objective: maximize lambda
+                    // 8) Objective: maximize lambda
                     GRBLinExpr obj = 0.0;
                     obj.AddTerm(1.0, lambda);
                     model.SetObjective(obj, GRB.MAXIMIZE);
@@ -321,7 +346,18 @@ namespace InterlockingMasonryLocalForces
                         AnalyzeEquilibriumEquations(model, geometry, data);
                     }
 
+                    // Debug output for auxiliary variables
+                    Console.WriteLine("\nNet Forces and Friction Status:");
+                    foreach (var fvp in faceVertexPairs.Take(5)) // Show first 5 for debugging
+                    {
+                        double netForce = GetNetNormalForce(fvp.FaceId, fvp.VertexId);
+                        double tangential = GetTangentialForce(fvp.FaceId, fvp.VertexId);
+                        bool inCompression = IsInCompression(fvp.FaceId, fvp.VertexId);
 
+                        Console.WriteLine($"F{fvp.FaceId}_V{fvp.VertexId}: " +
+                            $"Net={netForce:F3}, Ft={tangential:F3}, " +
+                            $"Status={(inCompression ? "Compression" : "Tension")}");
+                    }
                     SaveResultsToFile(model, @"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\results_cairo.txt", data);
                     // 10) Print solution
                     PrintSolution(model);
@@ -556,30 +592,123 @@ namespace InterlockingMasonryLocalForces
 
         private void CreateVariables(GRBModel model, ProblemData data)
         {
-            int m = faceVertexPairs.Count; // number of pairs
-            fAll = new GRBVar[2 * m];
+            int numFaceVertexPairs = faceVertexPairs.Count;
+            int numVars = numFaceVertexPairs * 3 + 1; // 3 per pair + lambda
 
-            for (int j = 0; j < m; j++)
+            fAll = new GRBVar[numVars];
+            fnNetVars = new GRBVar[numFaceVertexPairs];  // One Fn_net per face-vertex pair
+            binaryVars = new GRBVar[numFaceVertexPairs]; // One binary var per face-vertex pair
+            baseVarIndexMap = new Dictionary<(int faceId, int vertexId), int>();
+
+            int varIndex = 0;
+
+            foreach (var fvp in faceVertexPairs)
             {
-                // f_n >= 0
-                fAll[2 * j] = model.AddVar(
-                    0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
-                    $"fN_{j}"
-                );
+                int pairIndex = pairIndexMap[(fvp.FaceId, fvp.VertexId)];
 
-                // f_t unbounded
-                fAll[2 * j + 1] = model.AddVar(
-                    -GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
-                    $"fT_{j}"
-                );
+                // Store base index for this face-vertex pair
+                baseVarIndexMap[(fvp.FaceId, fvp.VertexId)] = varIndex;
+
+                // ALWAYS create 3 variables: compression, tension, tangential
+                // fn_comp: 0 to +infinity (compression)
+                fAll[varIndex] = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
+                    $"fn_comp_F{fvp.FaceId}_V{fvp.VertexId}");
+                varIndex++;
+
+                // fn_tens: -infinity to 0 (tension magnitude, always negative)
+                fAll[varIndex] = model.AddVar(-GRB.INFINITY, 0.0, 0.0, GRB.CONTINUOUS,
+    $"fn_tens_F{fvp.FaceId}_V{fvp.VertexId}");
+                varIndex++;
+
+                // ft: -infinity to +infinity (tangential can go either way)
+                fAll[varIndex] = model.AddVar(-GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
+                    $"ft_F{fvp.FaceId}_V{fvp.VertexId}");
+                varIndex++;
+
+                //  Auxiliary variable Fn_net (can be negative)
+                fnNetVars[pairIndex] = model.AddVar(-GRB.INFINITY, GRB.INFINITY, 0.0, GRB.CONTINUOUS,
+                    $"fn_net_F{fvp.FaceId}_V{fvp.VertexId}");
+
+                //  Binary variable for compression/tension logic
+                binaryVars[pairIndex] = model.AddVar(0.0, 1.0, 0.0, GRB.BINARY,
+                    $"z_F{fvp.FaceId}_V{fvp.VertexId}");
             }
 
-            // Also create lambda
+            // Lambda (load factor)
             lambda = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, "lambda");
-
-            model.Update();
+            fAll[varIndex] = lambda;
         }
 
+
+        /// Add constraints to enforce fn_tens = 0 for external faces
+        private void CreateTensionConstraints(GRBModel model)
+        {
+            foreach (var fvp in faceVertexPairs)
+            {
+                var face = _geometry.Faces[fvp.FaceId];
+
+                if (!face.IsInternal) // External faces cannot have tension
+                {
+                    int baseIdx = baseVarIndexMap[(fvp.FaceId, fvp.VertexId)];
+                    int tensionVarIdx = baseIdx + 1; // fn_tens is at baseIdx + 1
+
+                    // Constrain tension to zero for external faces
+                    model.AddConstr(fAll[tensionVarIdx] == 0,
+                        $"NoTension_F{fvp.FaceId}_V{fvp.VertexId}");
+                }
+            }
+        }
+
+        ///  Create auxiliary variable constraints: Fn_net = Fn_comp + Fn_tens
+        private void CreateAuxiliaryConstraints(GRBModel model)
+        {
+            foreach (var fvp in faceVertexPairs)
+            {
+                int pairIndex = pairIndexMap[(fvp.FaceId, fvp.VertexId)];
+                int baseIdx = baseVarIndexMap[(fvp.FaceId, fvp.VertexId)];
+
+                GRBVar fnComp = fAll[baseIdx];     // fn_comp
+                GRBVar fnTens = fAll[baseIdx + 1]; // fn_tens
+                GRBVar fnNet = fnNetVars[pairIndex];
+
+                // Constraint: Fn_net = Fn_comp + Fn_tens
+                model.AddConstr(fnNet == fnComp + fnTens,
+                    $"NetForce_F{fvp.FaceId}_V{fvp.VertexId}");
+            }
+        }
+
+
+
+        ///  helper functions using auxiliary variables
+        private double GetNetNormalForce(int faceId, int vertexId)
+        {
+            int pairIndex = pairIndexMap[(faceId, vertexId)];
+            return fnNetVars[pairIndex].X;
+        }
+
+        private double GetCompressionForce(int faceId, int vertexId)
+        {
+            int baseIdx = baseVarIndexMap[(faceId, vertexId)];
+            return fAll[baseIdx].X; // fn_comp
+        }
+
+        private double GetTensionForce(int faceId, int vertexId)
+        {
+            int baseIdx = baseVarIndexMap[(faceId, vertexId)];
+            return fAll[baseIdx + 1].X; // fn_tens
+        }
+
+        private double GetTangentialForce(int faceId, int vertexId)
+        {
+            int baseIdx = baseVarIndexMap[(faceId, vertexId)];
+            return fAll[baseIdx + 2].X; // ft
+        }
+
+        private bool IsInCompression(int faceId, int vertexId)
+        {
+            int pairIndex = pairIndexMap[(faceId, vertexId)];
+            return binaryVars[pairIndex].X > 0.5; // Binary variable > 0.5 means compression
+        }
 
         /// A * fAll - G = B * lambda
         /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
@@ -591,30 +720,58 @@ namespace InterlockingMasonryLocalForces
             if (n == 0 || p == 0)
                 return;
 
-            if (p != fAll.Length)
+            // Check against the variable structure
+            int expectedVars = faceVertexPairs.Count * 3; // 3 variables per face-vertex pair
+            if (p != expectedVars)
             {
-                Console.WriteLine($"Error: A-matrix has {p} columns but we have {fAll.Length} local variables. Mismatch!");
+                Console.WriteLine($"Error: A-matrix has {p} columns but expected {expectedVars} variables (3 per face-vertex pair). Mismatch!");
+                return;
+            }
+
+            if (fAll.Length < expectedVars + 1) // +1 for lambda
+            {
+                Console.WriteLine($"Error: fAll has {fAll.Length} variables but need at least {expectedVars + 1} (including lambda).");
                 return;
             }
 
             for (int i = 0; i < n; i++)
             {
                 GRBLinExpr lhs = 0.0;
-                for (int j = 0; j < p; j++)
+
+                //  Loop through matrix columns using 3-variable indexing
+                int matrixCol = 0;
+                foreach (var fvp in faceVertexPairs)
                 {
-                    double valA = data.MatrixA[i, j];
-                    if (Math.Abs(valA) > 1e-15)
-                        lhs.AddTerm(valA, fAll[j]);
+                    int baseIdx = baseVarIndexMap[(fvp.FaceId, fvp.VertexId)];
+
+                    // Add fn_comp contribution
+                    double valA_comp = data.MatrixA[i, matrixCol];
+                    if (Math.Abs(valA_comp) > 1e-15)
+                        lhs.AddTerm(valA_comp, fAll[baseIdx]);
+                    matrixCol++;
+
+                    // Add fn_tens contribution
+                    double valA_tens = data.MatrixA[i, matrixCol];
+                    if (Math.Abs(valA_tens) > 1e-15)
+                        lhs.AddTerm(valA_tens, fAll[baseIdx + 1]);
+                    matrixCol++;
+
+                    // Add ft contribution
+                    double valA_shear = data.MatrixA[i, matrixCol];
+                    if (Math.Abs(valA_shear) > 1e-15)
+                        lhs.AddTerm(valA_shear, fAll[baseIdx + 2]);
+                    matrixCol++;
                 }
-                // Subtract the gravity portion G[i]
+
+                //  Subtract the gravity portion G[i] (this was missing in my method!)
                 if (data.G != null && i < data.G.Length)
                     lhs.AddConstant(-data.G[i]);
 
-                // Subtract B[i] * lambda (moved to left side)
+                //  Subtract B[i] * lambda (moved to left side)
                 if (data.B != null && i < data.B.Length)
                     lhs.AddTerm(data.B[i], lambda);
 
-                // Equilibrium: A*fAll - G - B*lambda = 0
+                // Equilibrium equation: A*fAll - G - B*lambda = 0
                 model.AddConstr(lhs == 0.0, $"Equil_{i}");
             }
         }
@@ -624,6 +781,9 @@ namespace InterlockingMasonryLocalForces
 
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
+            double M = 1e6; // Big-M value for conditional constraints
+            double epsilon = 1e-6; // Small positive value
+
             foreach (var faceKvp in geometry.Faces)
             {
                 Face face = faceKvp.Value;
@@ -639,11 +799,21 @@ namespace InterlockingMasonryLocalForces
                     int idx = GetPairIndex(face.Id, vId);
                     if (idx < 0) continue; // skip if not found
 
-                    GRBVar fN = fAll[2 * idx];     // normal
-                    GRBVar fT = fAll[2 * idx + 1]; // tangent
+                    //  Get variables using the uniform 3-variable structure
+                    int baseIdx = baseVarIndexMap[(face.Id, vId)];
+                    GRBVar fN_comp = fAll[baseIdx];     // compression force
+                    GRBVar fN_tens = fAll[baseIdx + 1]; // tension force  
+                    GRBVar fT = fAll[baseIdx + 2];      // tangential force
+                    GRBVar fN_net = fnNetVars[idx];     // net normal force (auxiliary)
+                    GRBVar z = binaryVars[idx];         // binary variable (1 = compression, 0 = tension)
 
-                    // 1) No tension
-                    model.AddConstr(fN >= 0.0, $"NoTension_face{face.Id}_v{vId}");
+                    // 1) Binary logic for net normal force
+                    // If z = 1: fN_net > 0 (compression)
+                    // If z = 0: fN_net ≤ 0 (tension or zero)
+                    model.AddConstr(fN_net <= M * z,
+                        $"Binary1_face{face.Id}_v{vId}");
+                    model.AddConstr(fN_net >= epsilon * z - M * (1 - z),
+                        $"Binary2_face{face.Id}_v{vId}");
 
                     // 2) Vertex friction (with partial cohesion)
                     if (mu <= 1e-12 && c <= 1e-12)
@@ -653,8 +823,17 @@ namespace InterlockingMasonryLocalForces
                     }
                     else
                     {
-                        model.AddConstr(fT <= mu * fN + cPerVertex, $"FricPos_face{face.Id}_v{vId}");
-                        model.AddConstr(fT >= -mu * fN - cPerVertex, $"FricNeg_face{face.Id}_v{vId}");
+                        // CASE A: When in compression (z = 1): Apply friction |fT| ≤ μ * fN_net + c
+                        model.AddConstr(fT <= mu * fN_net + cPerVertex + M * (1 - z),
+                            $"FricPos_face{face.Id}_v{vId}");
+                        model.AddConstr(fT >= -(mu * fN_net + cPerVertex) - M * (1 - z),
+                            $"FricNeg_face{face.Id}_v{vId}");
+
+                        // CASE B: When in tension (z = 0): No friction => fT = 0
+                        model.AddConstr(fT <= M * z,
+                            $"NoFriction1_face{face.Id}_v{vId}");
+                        model.AddConstr(fT >= -M * z,
+                            $"NoFriction2_face{face.Id}_v{vId}");
                     }
                 }
             }
@@ -1730,9 +1909,9 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 // Load faces and geometry 
                 LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_icsa_friction_0e4.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
                 , geometry, data);
+                IdentifyInternalFaces(geometry);
                 DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
-
 
                 // Build equilibrium matrix programmatically
                 data.NumBlocks = geometry.Blocks.Values.Count(b => b.Id > 0); // Exclude supports
@@ -1836,77 +2015,6 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
 
             Console.WriteLine($"\nGenerated B vector with {numRows} entries (3 per block)");
             return vectorB;
-        }
-
-        private static void DisplayBVector(ProblemData data, GeometryModel geometry)
-        {
-            if (data.B == null || data.B.Length == 0)
-            {
-                Console.WriteLine("B vector is null or empty!");
-                return;
-            }
-
-            Console.WriteLine("\n=== B VECTOR CONTENTS ===");
-            Console.WriteLine($"Total length: {data.B.Length}");
-
-            // Get non-support blocks for mapping
-            var nonSupportBlocks = geometry.Blocks.Values
-                .Where(b => b.Id > 0)
-                .OrderBy(b => b.Id)
-                .ToList();
-
-            Console.WriteLine($"Expected length: {nonSupportBlocks.Count * 3} (3 equations per block)");
-
-            if (data.B.Length != nonSupportBlocks.Count * 3)
-            {
-                Console.WriteLine("⚠️  WARNING: B vector length doesn't match expected length!");
-            }
-
-            // Display header
-            Console.WriteLine("\nRow | Block | Equation |    B Value    | Description");
-            Console.WriteLine("----|-------|----------|---------------|------------------");
-
-            for (int i = 0; i < data.B.Length; i++)
-            {
-                int blockIndex = i / 3;
-                int equationType = i % 3;
-
-                string blockId = "?";
-                string eqName = "";
-                string description = "";
-
-                if (blockIndex < nonSupportBlocks.Count)
-                {
-                    var block = nonSupportBlocks[blockIndex];
-                    blockId = block.Id.ToString();
-
-                    switch (equationType)
-                    {
-                        case 0:
-                            eqName = "Fx";
-                            description = $"Applied Fx = {block.AppliedFx:F3}";
-                            break;
-                        case 1:
-                            eqName = "Fy";
-                            description = $"Applied Fy = {block.AppliedFy:F3}";
-                            break;
-                        case 2:
-                            eqName = "Mom";
-                            double momentArm_x = block.LoadApplicationX - block.CentroidX;
-                            double momentArm_y = block.CentroidY - block.LoadApplicationY;
-                            double expectedMoment = block.AppliedFy * momentArm_x + block.AppliedFx * momentArm_y;
-                            description = $"Computed = {expectedMoment:F6}";
-                            break;
-                    }
-                }
-                else
-                {
-                    eqName = "???";
-                    description = "Block index out of range";
-                }
-
-                Console.WriteLine($"{i,3} | {blockId,5} | {eqName,8} | {data.B[i],13:F6} | {description}");
-            }
         }
 
 
@@ -2078,6 +2186,90 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             return Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
         }
 
+        private static void IdentifyInternalFaces(GeometryModel geometry)
+        {
+            foreach (var face in geometry.Faces.Values)
+            {
+                // Internal faces are those where BOTH blocks are real (non-support) blocks
+                // Support blocks have Id <= 0
+                if (face.BlockJ > 0 && face.BlockK > 0)
+                {
+                    face.IsInternal = true;
+                    Console.WriteLine($"Face {face.Id} marked as INTERNAL (between blocks {face.BlockJ} and {face.BlockK})");
+                }
+            }
+        }
+        private static void DisplayBVector(ProblemData data, GeometryModel geometry)
+        {
+            if (data.B == null || data.B.Length == 0)
+            {
+                Console.WriteLine("B vector is null or empty!");
+                return;
+            }
+
+            Console.WriteLine("\n=== B VECTOR CONTENTS ===");
+            Console.WriteLine($"Total length: {data.B.Length}");
+
+            // Get non-support blocks for mapping
+            var nonSupportBlocks = geometry.Blocks.Values
+                .Where(b => b.Id > 0)
+                .OrderBy(b => b.Id)
+                .ToList();
+
+            Console.WriteLine($"Expected length: {nonSupportBlocks.Count * 3} (3 equations per block)");
+
+            if (data.B.Length != nonSupportBlocks.Count * 3)
+            {
+                Console.WriteLine("⚠️  WARNING: B vector length doesn't match expected length!");
+            }
+
+            // Display header
+            Console.WriteLine("\nRow | Block | Equation |    B Value    | Description");
+            Console.WriteLine("----|-------|----------|---------------|------------------");
+
+            for (int i = 0; i < data.B.Length; i++)
+            {
+                int blockIndex = i / 3;
+                int equationType = i % 3;
+
+                string blockId = "?";
+                string eqName = "";
+                string description = "";
+
+                if (blockIndex < nonSupportBlocks.Count)
+                {
+                    var block = nonSupportBlocks[blockIndex];
+                    blockId = block.Id.ToString();
+
+                    switch (equationType)
+                    {
+                        case 0:
+                            eqName = "Fx";
+                            description = $"Applied Fx = {block.AppliedFx:F3}";
+                            break;
+                        case 1:
+                            eqName = "Fy";
+                            description = $"Applied Fy = {block.AppliedFy:F3}";
+                            break;
+                        case 2:
+                            eqName = "Mom";
+                            double momentArm_x = block.LoadApplicationX - block.CentroidX;
+                            double momentArm_y = block.CentroidY - block.LoadApplicationY;
+                            double expectedMoment = block.AppliedFy * momentArm_x + block.AppliedFx * momentArm_y;
+                            description = $"Computed = {expectedMoment:F6}";
+                            break;
+                    }
+                }
+                else
+                {
+                    eqName = "???";
+                    description = "Block index out of range";
+                }
+
+                Console.WriteLine($"{i,3} | {blockId,5} | {eqName,8} | {data.B[i],13:F6} | {description}");
+            }
+        }
+
 
         public static void ComputeFaceNormalsFromGeometry(GeometryModel geometry)
         {
@@ -2224,14 +2416,7 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
 
 
 
-        // be informed if some input data is modified by the solver 
-        static void LogDataModification(int lineNo, string message)
-        {
-            string formattedMsg = $"[DATA MODIFIED] Line {lineNo}: {message}";
-            Console.ForegroundColor = ConsoleColor.Yellow;  // Highlight modifications
-            Console.WriteLine(formattedMsg);
-            Console.ResetColor();  // Reset to default color
-        }
+
 
 
         // --- DumpFaceData Method (No changes needed based on analysis) ---
