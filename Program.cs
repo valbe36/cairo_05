@@ -242,12 +242,9 @@ namespace InterlockingMasonryLocalForces
         private GRBVar[] fAll;
         private GRBVar lambda;
         private GRBVar[] fnNetVars;  // Fn_net = Fn_comp + Fn_tens
-        private GRBVar[] binaryVars; // z_i = 1 if Fn_net_i > 0, 0 otherwise
-        //  storing Gurobi variables (eccVars) mapped by faceId
-        private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>();
-        // maps (faceId, vertexId) -> pair index
-        private Dictionary<(int face, int vtx), int> pairIndexMap;
-        // Uniform variable mapping: every face-vertex has exactly 3 variables
+        private GRBVar[] binaryVars; // z_i = 1 if Fn_net_i > 0, 0 otherwise //  storing Gurobi variables (eccVars) mapped by faceId
+        private Dictionary<int, GRBVar> faceEccVars = new Dictionary<int, GRBVar>(); // maps (faceId, vertexId) -> pair index
+        private Dictionary<(int face, int vtx), int> pairIndexMap;  // Uniform variable mapping: every face-vertex has exactly 3 variables
         private Dictionary<(int faceId, int vertexId), int> baseVarIndexMap;
         private int GetPairIndex(int faceId, int vertexId) =>
             pairIndexMap.TryGetValue((faceId, vertexId), out int idx) ? idx : -1;
@@ -287,6 +284,8 @@ namespace InterlockingMasonryLocalForces
 
                     // c. Auxiliary variable definitions (Fn_net = Fn_comp + Fn_tens)
                     CreateAuxiliaryConstraints(model);
+
+                    CalculateBigM(geometry, data);
 
                     // d. Contact/friction constraints (updated to use auxiliary variables)
                     AddContactConstraints(model, geometry, data);
@@ -747,6 +746,64 @@ namespace InterlockingMasonryLocalForces
             int pairIndex = pairIndexMap[(faceId, vertexId)];
             return binaryVars[pairIndex].X > 0.5; // Binary variable > 0.5 means compression
         }
+        /// Simple: Use actual face areas from your geometry
+        private double CalculateBigM(GeometryModel geometry, ProblemData data)
+        {
+            if (!geometry.Faces.Any())
+            {
+                Console.WriteLine("WARNING: No faces found for Big-M calculation!");
+                return 1e7; // Default fallback
+            }
+
+            // Calculate actual face areas from your geometry
+            List<double> faceAreas = new List<double>();
+            double totalArea = 0;
+
+            foreach (var face in geometry.Faces.Values)
+            {
+                double area = face.Thickness * face.Length;  // m²
+                faceAreas.Add(area);
+                totalArea += area;
+            }
+
+            double maxArea = faceAreas.Max();
+            double avgArea = totalArea / faceAreas.Count;
+
+            // Use maximum area for conservative Big-M
+            double maxCompressionForce = data.SigmaC * maxArea;  // N
+
+            // Add some buffer for shear forces (friction + cohesion)
+            double maxMu = Math.Max(data.Mu, geometry.Faces.Values.Max(f => f.MuOverride ?? 0));
+            double maxCohesion = geometry.Faces.Values.Max(f => f.CohesionValue * f.Thickness * f.Length);
+            double maxShearForce = maxMu * maxCompressionForce + maxCohesion;
+
+            // Big-M = 10× maximum expected force
+            double maxForce = Math.Max(maxCompressionForce, maxShearForce);
+            double bigM = 10.0 * maxForce;
+
+            Console.WriteLine($"=== BIG-M FROM ACTUAL GEOMETRY ===");
+            Console.WriteLine($"Number of faces: {geometry.Faces.Count}");
+            Console.WriteLine($"Face areas: min={faceAreas.Min():F4} m², avg={avgArea:F4} m², max={maxArea:F4} m²");
+            Console.WriteLine($"SigmaC = {data.SigmaC / 1e6:F1} MPa");
+            Console.WriteLine($"Max compression force = {maxCompressionForce / 1e3:F0} kN");
+            Console.WriteLine($"Max shear force = {maxShearForce / 1e3:F0} kN");
+            Console.WriteLine($"Big-M = {bigM / 1e6:F1} MN = {bigM:E2} N");
+
+            // Comparison with your current value
+            double currentM = 1e6;
+            if (maxCompressionForce > currentM)
+            {
+                Console.WriteLine($"⚠️  CRITICAL: Your current M={currentM:E0} N is TOO SMALL!");
+                Console.WriteLine($"   Largest compression force ({maxCompressionForce:E0} N) exceeds Big-M");
+                Console.WriteLine($"   This will cause INCORRECT constraint behavior!");
+            }
+            else
+            {
+                Console.WriteLine($"✓ Your current M={currentM:E0} N is adequate (safety factor: {currentM / maxCompressionForce:F1}×)");
+            }
+
+            return bigM;
+        }
 
         /// A * fAll - G = B * lambda
         /// Where A has #rows = data.NumRows, #cols = data.NumCols = 2 * (faceVertexPairs.Count).
@@ -819,7 +876,7 @@ namespace InterlockingMasonryLocalForces
 
         private void AddContactConstraints(GRBModel model, GeometryModel geometry, ProblemData data)
         {
-            double M = 1e6; // Big-M value for conditional constraints
+            double M = CalculateBigM(geometry, data); // Big-M value for conditional constraints
             double epsilon = 1e-6; // Small positive value
 
             foreach (var faceKvp in geometry.Faces)
