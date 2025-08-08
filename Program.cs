@@ -14,9 +14,10 @@ Format (per line):  BlockID, CentroidX, CentroidY, AppliedFx, AppliedFy, x_coord
 Header:[Vertices]
 Format (per line):vertexID, x_coord, y_coord
 Header: [Faces]
-Format (per line): faceID, ID_block1, ID_block2, ID_pt1, ID_pt2, Thickness, Cohesion, friction coeff. 
+Format (per line): faceID, ID_block1, ID_block2, ID_pt1, ID_pt2, Thickness, Cohesion, friction coeff., IsInternal 
 Header: [VectorG]
-   
+
+ 
        # lines are disregarded
 
 */
@@ -34,8 +35,8 @@ namespace InterlockingMasonryLocalForces
         public double[] G { get; set; }
         public int NumBlocks { get; set; }
         public double Mu { get; set; } = 0.4;
-        public double SigmaC { get; set; } = 45000;
-        public double TensileStrength { get; set; } = 4500;  // New: tensile strength (MPa)
+        public double SigmaC { get; set; } = 8200;
+        public double SigmaT { get; set; } = 820;  // New: tensile strength (MPa)
         public int NumRows => MatrixA?.GetLength(0) ?? 0;
         public int NumCols => MatrixA?.GetLength(1) ?? 0;
         public int ExpectedNumVariables { get; set; }
@@ -1909,7 +1910,6 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                 // Load faces and geometry 
                 LoadAllData(@"C:\Users\vb\OneDrive - Aarhus universitet\Dokumenter 1\work research\54 ICSA\JOURNAL paper\analyses\/data_icsa_friction_0e4.txt"   //data_pseudoparallel_friction_0e4  data_cairo_friction_0e01
                 , geometry, data);
-                IdentifyInternalFaces(geometry);
                 DisplayBVector(data, geometry);
                 ComputeFaceNormalsFromGeometry(geometry);
 
@@ -2121,7 +2121,8 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
 
                             Thickness = double.Parse(faceParts[5]),
                             CohesionValue = double.Parse(faceParts[6]),
-                            MuOverride = double.Parse(faceParts[7])
+                            MuOverride = double.Parse(faceParts[7]),
+                            IsInternal = faceParts.Length > 8 ? (int.Parse(faceParts[8]) == 1) : false
                         };
 
                         // Check that referenced vertices exist
@@ -2155,7 +2156,16 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
                             continue;
                         }
 
-                        geometry.Faces.Add(face.Id, face);
+                        if (!geometry.Faces.TryAdd(face.Id, face))
+                        {
+                            Console.WriteLine($"Line {lineNo}: Duplicate face ID {face.Id} found. Skipping.");
+                        }
+
+                        // Log internal faces for verification
+                        if (face.IsInternal)
+                        {
+                            Console.WriteLine($"Face {face.Id} marked as INTERNAL CRACK (between sub-blocks {face.BlockJ} and {face.BlockK})");
+                        }
                         break;
 
                     case "[VectorG]":
@@ -2186,19 +2196,6 @@ $"(|shear|={Math.Abs(totalShear):F3}, limit={shearLimit:F3})");
             return Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
         }
 
-        private static void IdentifyInternalFaces(GeometryModel geometry)
-        {
-            foreach (var face in geometry.Faces.Values)
-            {
-                // Internal faces are those where BOTH blocks are real (non-support) blocks
-                // Support blocks have Id <= 0
-                if (face.BlockJ > 0 && face.BlockK > 0)
-                {
-                    face.IsInternal = true;
-                    Console.WriteLine($"Face {face.Id} marked as INTERNAL (between blocks {face.BlockJ} and {face.BlockK})");
-                }
-            }
-        }
         private static void DisplayBVector(ProblemData data, GeometryModel geometry)
         {
             if (data.B == null || data.B.Length == 0)
