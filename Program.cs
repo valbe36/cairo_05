@@ -378,33 +378,68 @@ namespace InterlockingMasonryLocalForces
             {
                 foreach (int vId in face.VertexIds)
                 {
-                    matrixColumnMap[(face.Id, vId)] = matrixColIdx++;
+                    matrixColumnMap[(face.Id, vId)] = matrixColIdx;
+                    matrixColIdx += 3; // NEW: 3 variables per face-vertex pair
                 }
             }
 
-            // Compare with your variable ordering
+            // Compare with variable ordering
             bool orderingMatch = true;
             for (int j = 0; j < faceVertexPairs.Count; j++)
             {
                 var pair = faceVertexPairs[j];
-                int expectedMatrixCol = matrixColumnMap[(pair.FaceId, pair.VertexId)];
+                int expectedMatrixBaseCol = matrixColumnMap[(pair.FaceId, pair.VertexId)];
+                int actualBaseIdx = baseVarIndexMap[(pair.FaceId, pair.VertexId)];
 
-                if (expectedMatrixCol != j)
+                // Check if the base indices match
+                if (expectedMatrixBaseCol != j * 3)
                 {
                     Console.WriteLine($"MISMATCH: Variable pair {j} (Face {pair.FaceId}, Vertex {pair.VertexId}) " +
-                                    $"corresponds to matrix column {expectedMatrixCol}");
+                                    $"expected matrix base column {j * 3}, got {expectedMatrixBaseCol}");
+                    orderingMatch = false;
+                }
+
+                // Verify the variable mapping is correct
+                if (actualBaseIdx != j * 3)
+                {
+                    Console.WriteLine($"VARIABLE INDEX MISMATCH: Pair {j} should have base index {j * 3}, got {actualBaseIdx}");
                     orderingMatch = false;
                 }
             }
 
+            // Additional checks for the new structure
+            int expectedTotalCols = faceVertexPairs.Count * 3;
+            int actualMatrixCols = data.NumCols;
+
+            Console.WriteLine($"Face-vertex pairs: {faceVertexPairs.Count}");
+            Console.WriteLine($"Expected matrix columns: {expectedTotalCols} (3 per pair)");
+            Console.WriteLine($"Actual matrix columns: {actualMatrixCols}");
+            Console.WriteLine($"Variable array size: {fAll.Length} (should be {expectedTotalCols + 1} including lambda)");
+
+            if (expectedTotalCols != actualMatrixCols)
+            {
+                Console.WriteLine($"ERROR: Expected {expectedTotalCols} matrix columns but got {actualMatrixCols}");
+                orderingMatch = false;
+            }
+
             if (orderingMatch)
             {
-                Console.WriteLine("✓ Matrix columns and variables are correctly aligned");
+                Console.WriteLine("✓ Matrix columns and 3-variable structure are correctly aligned");
+
+                // Verify variable types at each position
+                Console.WriteLine("\nVariable structure verification:");
+                for (int i = 0; i < Math.Min(5, faceVertexPairs.Count); i++) // Check first 5 pairs
+                {
+                    var pair = faceVertexPairs[i];
+                    int baseIdx = baseVarIndexMap[(pair.FaceId, pair.VertexId)];
+                    Console.WriteLine($"  Pair {i} F{pair.FaceId}_V{pair.VertexId}: " +
+                                    $"fn_comp[{baseIdx}], fn_tens[{baseIdx + 1}], ft[{baseIdx + 2}]");
+                }
             }
             else
             {
-                Console.WriteLine("✗ CRITICAL ERROR: Matrix-variable ordering mismatch!");
-                Console.WriteLine("This will cause incorrect solutions that worsen with friction.");
+                Console.WriteLine("✗ CRITICAL ERROR: Matrix-variable ordering mismatch in 3-variable structure!");
+                Console.WriteLine("This will cause incorrect solutions!");
             }
         }
 
@@ -634,6 +669,8 @@ namespace InterlockingMasonryLocalForces
                 binaryVars[pairIndex] = model.AddVar(0.0, 1.0, 0.0, GRB.BINARY,
                     $"z_F{fvp.FaceId}_V{fvp.VertexId}");
             }
+
+
 
             // Lambda (load factor)
             lambda = model.AddVar(0.0, GRB.INFINITY, 0.0, GRB.CONTINUOUS, "lambda");
